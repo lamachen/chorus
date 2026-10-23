@@ -11,7 +11,7 @@
  * der neue Stamp zuverlässig.
  */
 
-const STAMP = '20261023031416';
+const STAMP = '20261023033508';
 const CACHE = 'chorus-' + STAMP;
 const IMMUTABLE = ['/vendor/', '/assets/', '.onnx', '.wasm', '.mjs.map'];
 

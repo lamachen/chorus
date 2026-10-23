@@ -209,42 +209,21 @@ export class Vision {
     this._loop();
     if (this.paused || !this._paintGrab()) return;
 
-    let blob;
-    try { blob = await new Promise(res => this.grab.toBlob(res, 'image/jpeg', this.quality)); }
-    catch (e) { this.onError('toBlob: ' + e.message); return; }
-    if (!blob) return;
-
     const id = ++this.frameId;
-    const buf = await blob.arrayBuffer();
-    this.lastBytes = buf.byteLength;
     const now = performance.now();
     this.sentTimes.push(now);
     while (this.sentTimes.length && now - this.sentTimes[0] > 5000) this.sentTimes.shift();
 
-    this.onFrame(id, buf, {
-      w: this.grab.width, h: this.grab.height, bytes: buf.byteLength,
-      fps: this.sentTimes.length / 5, mode: this.mode, ts: Date.now(),
-    });
-
+    // Anzeige = exakt dieselben Pixel, die das VLM bekommt (derselbe Canvas)
     if (this.mode === 'exact') {
-      // paint the *decoded JPEG we just sent* - byte-identical to the model input
-      try {
-        const bmp = await createImageBitmap(blob);
-        this._lastBmp = bmp;
-        this.vctx.drawImage(bmp, 0, 0);
-        bmp.close && bmp.close();
-      } catch {
-        this.vctx.drawImage(this.grab, 0, 0);
-      }
-      this._drawLast();
+      this.vctx.drawImage(this.grab, 0, 0);
       this._flash = 3;
     }
+    this.onFrame(id, null, {
+      w: this.grab.width, h: this.grab.height,
+      fps: this.sentTimes.length / 5, mode: this.mode, ts: Date.now(),
+    });
     this._stats();
-  }
-
-  _drawLast() {
-    if (!this._lastBmp && this.mode === 'exact') { /* nothing yet */ }
-    this.vctx.imageSmoothingEnabled = true;
   }
 
   _raf() {
@@ -266,7 +245,7 @@ export class Vision {
   _stats() {
     this.onStats({
       id: this.frameId, w: this.grab.width, h: this.grab.height,
-      kb: Math.round(this.lastBytes / 1024), fps: this.sentTimes.length / 5,
+      fps: this.sentTimes.length / 5,
       src: this.video ? `${this.video.videoWidth}×${this.video.videoHeight}` : '-',
       paused: this.paused, mode: this.mode, mirror: this.mirror, facing: this.facing,
       torch: this.torch, hasTorch: this.hasTorch,

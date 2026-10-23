@@ -1,46 +1,38 @@
 /**
- * Hands-free voice activity detection.
+ * Voice Activity Detection: Silero VAD (ONNX) über onnxruntime-web/wasm.
  *
- * Two interchangeable detectors behind one state machine:
+ * Eine einzige, echte Implementierung - kein Ersatz-Modell, keine Skripte:
+ *   AudioWorklet (Resample auf 16 kHz, 512-Frame=32 ms)
+ *     -> Silero-ONNX  -> Sprachwahrscheinlichkeit
+ *     -> Hysterese-Automat (Onset-Streak, Hang-over, Min/Max-Dauer)
  *
- *   1. Silero VAD  (neural, vendored ONNX + onnxruntime-web/wasm)  <- default
- *   2. DSP VAD     (adaptive noise floor + SNR + zero-crossing)    <- fallback
- *
- * Both emit a 0..1 speech probability per 32 ms frame, which is fed through
- * the same hysteresis state machine (onset streak, hang-over, min/max speech
- * length).  While she is talking the thresholds are raised so the phone's own
- * loudspeaker does not trigger barge-in (browser AEC helps, but is not perfect).
+ * Kann das ONNX-Modell nicht geladen werden, gibt es bewusst KEIN verstecktes
+ * Ersatzverfahren: `start()` wirft und die App zeigt das offen an.
+ * Die System-Spracherkennung hat eigenständig genug Endpunktung, um
+ * weiterhin gehört zu werden; Barge-in über den Mikro-Pegel bleibt aktiv.
  */
 
 const ORT_BASE = new URL('../vendor/ort/', import.meta.url).href;
 const MODEL_URL = new URL('../vendor/silero_vad.onnx', import.meta.url).href;
 
-const FRAME = 512;          // samples @16 kHz = 32 ms
+const FRAME = 512;          // 32 ms @16 kHz
 const FRAME_MS = 32;
 
-/* ------------------------------------------------------------------ */
-/*  state machine                                                      */
-/* ------------------------------------------------------------------ */
+/* ---------------- Hysterese-Automat ---------------- */
 class SpeechGate {
-  constructor(opts = {}) {
-    this.onset = opts.onset ?? 0.55;         // probability to start
-    this.offset = opts.offset ?? 0.35;       // probability to stay in speech
-    this.onsetFrames = opts.onsetFrames ?? 3;    // 96 ms
-    this.bargeOnsetFrames = opts.bargeOnsetFrames ?? 7;   // 224 ms while she talks
-    this.hangoverMs = opts.hangoverMs ?? 620;
-    this.minSpeechMs = opts.minSpeechMs ?? 240;
-    this.maxSpeechMs = opts.maxSpeechMs ?? 22000;
-    this.boost = 1.0;                        // >1 while she is speaking
+  constructor(o = {}) {
+    this.onset = o.onset ?? 0.55;
+    this.offset = o.offset ?? 0.35;
+    this.onsetFrames = o.onsetFrames ?? 3;
+    this.bargeOnsetFrames = o.bargeOnsetFrames ?? 5;
+    this.hangoverMs = o.hangoverMs ?? 620;
+    this.minSpeechMs = o.minSpeechMs ?? 240;
+    this.maxSpeechMs = o.maxSpeechMs ?? 22000;
+    this.boost = 1.0;
     this.reset();
   }
-  reset() {
-    this.speaking = false;
-    this.streak = 0;
-    this.t0 = 0;
-    this.tLastVoice = 0;
-  }
+  reset() { this.speaking = false; this.streak = 0; this.t0 = 0; this.tLastVoice = 0; }
   setBoost(v) { if ((v > 1) !== (this.boost > 1)) this.streak = 0; this.boost = v; }
-
   feed(p, now) {
     const on = this.onset * this.boost;
     const off = this.offset * this.boost;
@@ -57,8 +49,7 @@ class SpeechGate {
     } else {
       if (p >= off) this.tLastVoice = now;
       const voiced = now - this.tLastVoice;
-      const total = now - this.t0;
-      if (voiced > this.hangoverMs || total > this.maxSpeechMs) {
+      if (voiced > this.hangoverMs || now - this.t0 > this.maxSpeechMs) {
         this.speaking = false;
         const dur = this.tLastVoice - this.t0;
         this.streak = 0;
@@ -69,45 +60,7 @@ class SpeechGate {
   }
 }
 
-/* ------------------------------------------------------------------ */
-/*  DSP fallback                                                       */
-/* ------------------------------------------------------------------ */
-class DspVad {
-  constructor() {
-    this.name = 'dsp';
-    this.floor = -60;
-    this.smooth = 0;
-    this.initialised = false;
-  }
-  prob(frame) {
-    let sum = 0, zc = 0, prev = 0;
-    for (let i = 0; i < frame.length; i++) {
-      const v = frame[i];
-      sum += v * v;
-      if ((v >= 0) !== (prev >= 0)) zc++;
-      prev = v;
-    }
-    const rms = Math.sqrt(sum / frame.length);
-    const db = 20 * Math.log10(rms + 1e-7);
-    const zcr = zc / frame.length;            // 0..1, voice ~0.02-0.15, hiss >0.3
-
-    if (!this.initialised) { this.floor = db; this.initialised = true; }
-    else if (db < this.floor) this.floor = 0.82 * this.floor + 0.18 * db;
-    else this.floor = Math.min(db - 3, this.floor + 0.0035);
-
-    const snr = db - this.floor;
-    let p = (snr - 4) / 13;
-    p = Math.max(0, Math.min(1, p));
-    if (zcr > 0.34) p *= 0.35;                // broadband noise, not voice
-    else if (zcr < 0.02 && snr < 9) p *= 0.5; // very low-frequency rumble
-    this.smooth = 0.55 * p + 0.45 * this.smooth;
-    return this.smooth;
-  }
-}
-
-/* ------------------------------------------------------------------ */
-/*  Silero (ONNX)                                                      */
-/* ------------------------------------------------------------------ */
+/* ---------------- Silero (ONNX, sequenziell befüllt) ---------------- */
 class SileroVad {
   constructor(ort, session) {
     this.name = 'silero';
@@ -123,7 +76,7 @@ class SileroVad {
   prob(frame) {
     if (this.busy) { this.queue.push(frame); if (this.queue.length > 4) this.queue.shift(); return this.last; }
     this.busy = true;
-    this._run(frame).catch(() => {});
+    this._run(frame);
     return this.last;
   }
   async _run(frame) {
@@ -140,7 +93,7 @@ class SileroVad {
       this.last = this.smooth;
       if (this.onProb) this.onProb(this.last);
     } catch (e) {
-      this.error = String(e && e.message || e);
+      if (this.onError) this.onError(String(e && e.message || e));
     } finally {
       this.busy = false;
       const next = this.queue.shift();
@@ -150,21 +103,11 @@ class SileroVad {
   reset() { this.state = new Float32Array(2 * 128); this.smooth = 0; this.last = 0; }
 }
 
-/* ------------------------------------------------------------------ */
-/*  public class                                                       */
-/* ------------------------------------------------------------------ */
+/* ---------------- öffentliche Klasse ---------------- */
 export class MicVad {
-  /**
-   * @param {object} o
-   *   onSpeechStart(), onSpeechEnd(ms), onLevel(rms, prob), onInfo(obj), onError(e)
-   */
   constructor(o = {}) {
     this.cb = o;
-    this.opts = {
-      neural: true,
-      onset: 0.55, offset: 0.35, hangoverMs: 620, minSpeechMs: 240,
-      bargeBoost: 1.25, bargeOnsetFrames: 5, ...o.opts,
-    };
+    this.opts = { onset: 0.55, offset: 0.35, hangoverMs: 620, minSpeechMs: 240, bargeBoost: 1.25, bargeOnsetFrames: 5, ...o.opts };
     this.gate = new SpeechGate(this.opts);
     this.running = false;
     this.muted = false;
@@ -177,10 +120,7 @@ export class MicVad {
   async start() {
     if (this.running) return this.info;
     const stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: true, noiseSuppression: true, autoGainControl: true,
-        channelCount: 1, sampleRate: { ideal: 16000 },
-      },
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1, sampleRate: { ideal: 16000 } },
       video: false,
     });
     this.stream = stream;
@@ -191,43 +131,21 @@ export class MicVad {
     this.ctx = ctx;
     if (ctx.state === 'suspended') await ctx.resume();
 
-    const src = ctx.createMediaStreamSource(stream);
-    let detector = null;
-
-    if (this.opts.neural) {
-      try { detector = await this._loadSilero(); }
-      catch (e) { this.cb.onInfo && this.cb.onInfo({ detector: 'dsp', note: 'Silero nicht ladbar: ' + (e.message || e) }); }
-    }
-    if (!detector) detector = new DspVad();
+    const detector = await this._loadSilero();      // wirft, wenn nicht ladbar -> ehrlich
     this.detector = detector;
+    detector.onProb = (p) => this._probability(p);
+    detector.onError = (m) => this.cb.onError && this.cb.onError(m);
 
-    // ---- audio graph ----
-    const useWorklet = typeof ctx.audioWorklet !== 'undefined';
-    if (useWorklet) {
-      try {
-        await ctx.audioWorklet.addModule(new URL('./vad-worklet.js', import.meta.url).href);
-        this.node = new AudioWorkletNode(ctx, 'vad-processor', {
-          numberOfInputs: 1, numberOfOutputs: 0, channelCount: 1,
-          processorOptions: { targetRate: 16000, frameSize: FRAME },
-        });
-        this.node.port.onmessage = (e) => this._onMessage(e.data);
-        src.connect(this.node);
-      } catch (e) {
-        this.node = null;
-      }
-    }
-    if (!this.node) {
-      // ScriptProcessor fallback (older Safari)
-      this.sp = ctx.createScriptProcessor(2048, 1, 1);
-      this._spBuf = new Float32Array(0);
-      this.sp.onaudioprocess = (e) => this._onScript(e.inputBuffer.getChannelData(0));
-      src.connect(this.sp);
-      this.sp.connect(ctx.destination);   // required in some browsers; muted gain below
-      const g = ctx.createGain(); g.gain.value = 0; this.sp.disconnect(); this.sp.connect(g); g.connect(ctx.destination);
-    }
+    await ctx.audioWorklet.addModule(new URL('./vad-worklet.js', import.meta.url).href);
+    this.node = new AudioWorkletNode(ctx, 'vad-processor', {
+      numberOfInputs: 1, numberOfOutputs: 0, channelCount: 1,
+      processorOptions: { targetRate: 16000, frameSize: FRAME },
+    });
+    this.node.port.onmessage = (e) => this._onMessage(e.data);
+    ctx.createMediaStreamSource(stream).connect(this.node);
 
     this.running = true;
-    this.info = { detector: detector.name, sampleRate: ctx.sampleRate, worklet: !!this.node };
+    this.info = { detector: 'silero', sampleRate: ctx.sampleRate, worklet: true };
     this.cb.onInfo && this.cb.onInfo(this.info);
     return this.info;
   }
@@ -239,13 +157,9 @@ export class MicVad {
     ort.env.wasm.proxy = false;
     ort.env.wasm.simd = true;
     const session = await ort.InferenceSession.create(MODEL_URL, {
-      executionProviders: ['wasm'],
-      graphOptimizationLevel: 'all',
-      logSeverityLevel: 3,
+      executionProviders: ['wasm'], graphOptimizationLevel: 'all', logSeverityLevel: 3,
     });
-    const v = new SileroVad(ort, session);
-    v.onProb = (p) => this._probability(p);
-    return v;
+    return new SileroVad(ort, session);
   }
 
   _onMessage(msg) {
@@ -253,77 +167,39 @@ export class MicVad {
     if (msg.type === 'level') { this.level = msg.rms; return; }
     if (msg.type !== 'frame') return;
     if (this.muted) { this._probability(0); return; }
-    if (this.detector.name === 'silero') {
-      this.detector.prob(msg.data);            // async: probability arrives via onProb
-      this._fallbackTick(msg.data);            // keep a DSP estimate for the meter
-    } else {
-      this._probability(this.detector.prob(msg.data));
-    }
-  }
-
-  _fallbackTick(frame) {
-    if (!this._dsp) this._dsp = new DspVad();
-    this._dspShadow = this._dsp.prob(frame);
-    // if the neural net is lagging behind (queue full), fall back to the estimate
-    if (this.detector.busy && this.detector.queue.length >= 3) this._probability(this._dspShadow);
-  }
-
-  _onScript(ch) {
-    if (!this.running) return;
-    const prev = this._spBuf;
-    const buf = new Float32Array(prev.length + ch.length);
-    buf.set(prev); buf.set(ch, prev.length);
-    let sum = 0;
-    for (let i = 0; i < ch.length; i++) sum += ch[i] * ch[i];
-    this.level = Math.sqrt(sum / ch.length);
-    let off = 0;
-    while (buf.length - off >= FRAME) {
-      const frame = buf.slice(off, off + FRAME);
-      off += FRAME;
-      if (this.muted) { this._probability(0); continue; }
-      if (this.detector.name === 'silero') { this.detector.prob(frame); this._fallbackTick(frame); }
-      else this._probability(this.detector.prob(frame));
-    }
-    this._spBuf = buf.slice(off);
+    this.detector.prob(msg.data);
   }
 
   _probability(p) {
     this.prob = p;
     const now = performance.now();
-    // adaptiver Mikro-Noisefloor (für Level-Barge-in)
     if (!this.gate.speaking) this.noiseFloor = 0.985 * this.noiseFloor + 0.015 * Math.max(this.level, 0.002);
     this.cb.onLevel && this.cb.onLevel(this.level, p, now);
     const ev = this.gate.feed(p, now);
     if (!ev) return;
-    if (ev.type === 'start') this.cb.onSpeechStart && this.cb.onSpeechStart(ev);
+    if (ev.type === 'start') this.cb.onSpeechStart && this.cb.onSpeechStart();
     else this.cb.onSpeechEnd && this.cb.onSpeechEnd(ev);
   }
 
-  /** raise thresholds while she is talking (barge-in sensitivity) */
-  setSheSpeaks(on) {
-    this.gate.setBoost(on ? this.opts.bargeBoost : 1.0);
-    this.cb.onInfo && this.cb.onInfo({ ...this.info, barge: on });
-  }
-
+  setSheSpeaks(on) { this.gate.setBoost(on ? this.opts.bargeBoost : 1.0); }
   tune(o = {}) {
     Object.assign(this.opts, o);
     if (o.onset) this.gate.onset = o.onset;
     if (o.offset) this.gate.offset = o.offset;
     if (o.hangoverMs) this.gate.hangoverMs = o.hangoverMs;
     if (o.minSpeechMs) this.gate.minSpeechMs = o.minSpeechMs;
+    if (o.bargeBoost) this.gate.bargeBoost = this.opts.bargeBoost = o.bargeBoost;
+    if (o.bargeOnsetFrames) this.gate.bargeOnsetFrames = o.bargeOnsetFrames;
   }
-
   setMuted(m) { this.muted = m; this.gate.reset(); }
-
   stop() {
     this.running = false;
     try { this.node && this.node.disconnect(); } catch {}
-    try { this.sp && this.sp.disconnect(); } catch {}
     try { this.stream && this.stream.getTracks().forEach(t => t.stop()); } catch {}
     try { this.ctx && this.ctx.close(); } catch {}
-    this.node = this.sp = this.stream = this.ctx = null;
+    this.node = this.stream = this.ctx = null;
     this.gate.reset();
   }
 }
 
-export { SpeechGate, DspVad, SileroVad, FRAME, FRAME_MS };
+export { SpeechGate, FRAME, FRAME_MS };

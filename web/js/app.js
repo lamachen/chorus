@@ -1,107 +1,128 @@
 /**
- * Orchestrator: phone UI  ⇄  camera/Vision  ⇄  VAD  ⇄  system ASR/TTS  ⇄  FastVLM server
+ * CHORUS · FastVLM Live-Vision-Sprachchat - komplett on-device.
  *
- * Turn-taking loop (hands free):
- *   VAD speech start ──▶ (barge-in: stop her voice, tell the server to abort)
- *   VAD speech end   ──▶ commit timer
- *   ASR finals       ──▶ buffered into one utterance
- *   commit           ──▶ ws {t:"say"} ──▶ server streams sentences ──▶ TTS queue
- *   TTS end          ──▶ listening again  (half-duplex) / VAD-threshold back to normal
+ * Es gibt genau eine Wahrheit in dieser App:
+ *   - FastVLM-0.5B-ONNX (transformers.js/WebGPU, Fallback WASM) sieht dein Video
+ *     und schreibt die Antworten - frei generiert, nichts geskriptet.
+ *   - System-Spracherkennung hört dich, System-Sprachausgabe spricht sie.
+ *   - Silero-VAD + Mikro-Pegel steuern Turn-Taking und Barge-in.
+ *   - Alle Pegel im UI kommen aus echten Signalen (Mik-RMS, TTS-Word-Boundaries).
+ * Kein Server, kein Mock, kein Regel-Charakter, kein Demo-Modus, kein
+ * "laden"-Button: Mit dem Antippen eines Kontakts lädt das Modell sofort
+ * (Fortschritt sichtbar im Klingel-Screen) und sie meldet sich von selbst.
  */
 
+import * as UI from './ui.js';
 import { MicVad } from './vad.js';
 import { SystemTTS, SystemASR, rankVoices } from './speech.js';
 import { Vision } from './vision.js';
-import { LocalEngine, probeOnDevice, DEFAULT_PERSONAS, CHARACTER_SYSTEM, PROACTIVE_DIRECTIVE } from './local_engine.js';
 import { OnDeviceVLM, onDeviceSupported, PRESET_MB, splitSentences } from './vlm_webgpu.js';
-import * as UI from './ui.js';
+import { PERSONAS, getPersona, characterSystem, directives } from './persona.js';
+import { Activation } from './activation.js';
 
-const KEY = 'fastvlm-call-settings-v1';
-
+const KEY = 'chorus-settings-v2';
 const DEFAULTS = {
-  lang: 'de-DE',
-  persona: 'mara',
-  // system speech
+  lang: 'de-DE', persona: 'mara',
   voiceURI: '', rate: 1.0, pitch: 1.05, volume: 1,
-  // hands-free audio
-  engineMode: 'auto', onDevicePreset: 'compact',
-  cameraFacing: 'environment', mirrorMode: 'auto',
-  handsFree: true, neuralVad: true, vadOnset: 0.55, vadOffset: 0.35,
-  vadHangover: 620, halfDuplex: true, bargeIn: true,
-  // frames handed to FastVLM
+  handsFree: true, vadOnset: 0.55, vadHangover: 620, halfDuplex: true, bargeIn: true,
   frameSize: 768, ratio: '1:1', intervalMs: 1100, quality: 0.8,
-  mirror: true, previewMode: 'exact', pixelExact: false,
-  // character
-  proactive: true, activationMode: 'hybrid', activationThreshold: 0.62,
-  activationCooldown: 22, subtitles: true,
-  // optional external dialogue LLM
-  llmEnable: false, llmBase: 'http://127.0.0.1:11434/v1', llmModel: 'llama3.1:8b', llmKey: '',
+  previewMode: 'exact', pixelExact: false, cameraFacing: 'environment', mirrorMode: 'auto',
+  proactive: true, activationThreshold: 0.62, activationCooldown: 22, subtitles: true,
+  onDevicePreset: 'compact', turbo: false,
 };
 
-const load = () => {
-  try { return { ...DEFAULTS, ...(JSON.parse(localStorage.getItem(KEY)) || {}) }; }
-  catch { return { ...DEFAULTS }; }
-};
+const load = () => { try { return { ...DEFAULTS, ...(JSON.parse(localStorage.getItem(KEY)) || {}) }; } catch { return { ...DEFAULTS }; } };
 
 class App {
   constructor() {
     this.s = load();
     this.state = 'idle';
-    this.personas = [];
-    this.persona = null;
+    this.persona = getPersona(this.s.persona);
     this.recents = [];
-    this.server = null;
-    this.ws = null;
-    this.t0 = 0;
     this.pendingText = '';
     this.commitTimer = null;
     this.herBubble = null;
+    this.herPending = '';
     this.ring = new UI.RingTone();
-    this.lastTurnMs = null;
-    this.localMode = false;
-    this.local = null;
-    this.perf = { ttft: [], ttfa: [] };
+    this.vlm = null;
+    this.vlmHistory = [];
+    this.vlmBusy = false;
+    this.greeted = false;
+    this.perf = { ttfa: [] };
     this.commitAt = 0;
-    this.onDevice = null;
+    this.lastExchange = 0;
     this.buildInfo = null;
+    this.onDevice = null;
+    this.act = new Activation({ threshold: this.s.activationThreshold, cooldown: this.s.activationCooldown, enabled: this.s.proactive });
+
     this.tts = new SystemTTS({
       onVoices: (v) => this.onVoices(v),
-      onStart: (t) => { this._curTtsText = t; this.onTtsStart(t); },
-      onEnd: () => this.onTtsEnd(),
+      onStart: (t) => this.onTtsStart(t),
+      onEnd: () => this.onTtsEnd(false),
       onCancel: () => this.onTtsEnd(true),
-      onSentenceEnd: (t) => { this.subHer(t); },
+      onSentenceEnd: (t) => this.subHer(t),
       onBoundary: (e) => this.onBoundary(e),
-      onError: (e) => { if (!this._ttsErrAt || Date.now() - this._ttsErrAt > 8000) { this._ttsErrAt = Date.now(); UI.toast('Sprachausgabe: ' + e); } },
+      onError: (e) => this.toastOnce('tts', 'Sprachausgabe: ' + e),
     });
     this.asr = new SystemASR({
       lang: this.s.lang,
-      onFinal: (t, c) => this.onAsrFinal(t, c),
+      onFinal: (t) => this.onAsrFinal(t),
       onInterim: (t) => this.subYou(t),
       onState: (st) => this.setChip('chip-asr', 'ASR ' + st, st === 'listening'),
       onError: (e) => { if (e !== 'no-speech' && e !== 'aborted') this.setChip('chip-asr', 'ASR ' + e, false, true); },
-      onFatal: (e) => UI.toast('Mikro/Spracherkennung blockiert: ' + e),
-      onSpeech: () => {},
+      onFatal: (e) => UI.toast('Spracherkennung blockiert: ' + e, 5000),
     });
     this.vad = new MicVad({
-      opts: {
-        neural: this.s.neuralVad, onset: this.s.vadOnset, offset: this.s.vadOffset,
-        hangoverMs: this.s.vadHangover,
-      },
+      opts: { onset: this.s.vadOnset, hangoverMs: this.s.vadHangover },
       onSpeechStart: () => this.onSpeechStart(),
       onSpeechEnd: (e) => this.onSpeechEnd(e),
       onLevel: (rms, p) => this.onLevel(rms, p),
-      onInfo: (i) => this.setChip('chip-vad', 'VAD ' + i.detector + (i.barge ? ' ↑' : ''), i.detector === 'silero'),
-      onError: (e) => UI.toast('VAD: ' + e),
+      onInfo: (i) => this.setChip('chip-vad', 'VAD ' + i.detector, i.detector === 'silero'),
+      onError: (m) => this.setChip('chip-vad', 'VAD Fehler', false, true),
     });
     this.vision = new Vision({
       video: UI.$('cam'), grab: UI.$('grab'), view: UI.$('modelview'),
       size: this.s.frameSize, ratio: this.s.ratio, quality: this.s.quality,
       intervalMs: this.s.intervalMs, mirrorMode: this.s.mirrorMode,
       facing: this.s.cameraFacing, mode: this.s.previewMode,
-      onFrame: (id, buf, meta) => this.sendFrame(id, buf, meta),
+      onFrame: () => {},                       // Frames bleiben on-device
       onStats: (st) => this.onVisionStats(st),
-      onError: (e) => UI.toast('Kamera: ' + e),
+      onError: (e) => UI.toast('Kamera: ' + e, 4000),
     });
+  }
+
+  /* ================= Boot ================= */
+  async boot() {
+    UI.startClock(UI.$('sb-time'));
+    this.buildWaves();
+    this.applyPersisted();
+    this.wireStatic();
+    this.buildSettingsSchema();
+    this.checkSecureContext();
+    fetch('build_info.json').then(r => r.ok ? r.json() : null).then(j => { this.buildInfo = j; }).catch(() => {});
+    this.probeOnDeviceInfo();
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('sw.js').then((reg) => {
+        reg.addEventListener('updatefound', () => {
+          const ni = reg.installing;
+          ni && ni.addEventListener('statechange', () => {
+            if (ni.state === 'installed' && navigator.serviceWorker.controller) UI.toast('Update geladen – Seite wechselt gleich automatisch');
+          });
+        });
+      }).catch(() => {});
+    }
+  }
+
+  probeOnDeviceInfo() { this.onDevice = onDeviceSupported(); this.renderInfo(); }
+
+  checkSecureContext() {
+    if (window.isSecureContext || ['localhost', '127.0.0.1'].includes(location.hostname)) return;
+    const gate = UI.el('div', 'gate');
+    gate.innerHTML = `<h2>Kamera, Mikro & On-Device-KI brauchen HTTPS</h2>
+      <p>Diese Seite läuft über <code>${location.protocol}//${location.host}</code>. Browser geben
+      Kamera/Mikro nur im secure context frei. Nutze <code>https://lamachen.github.io/chorus/web/index.html</code>
+      oder einen lokalen HTTPS-Server.</p>`;
+    document.getElementById('phone').appendChild(gate);
   }
 
   buildWaves() {
@@ -109,181 +130,35 @@ class App {
     mk('wave-you', 10); mk('wave-her', 14);
   }
 
-  /** Echte Pegel: Mikro-RMS (Worklet) + TTS-Word-Boundaries / Satzfortschritt */
-  renderAudio() {
-    cancelAnimationFrame(this._rafId);
-    const loop = () => {
-      this._rafId = requestAnimationFrame(loop);
-      if (this.state !== 'in-call') return;
-      const now = performance.now();
-
-      // ---- DU: echter Mikro-RMS-Verlauf ----
-      const lvl = this.vad?.running ? this.vad.level : 0;
-      this._micHist = (this._micHist || []).concat(lvl).slice(-10);
-      const yb = UI.$('wave-you').children;
-      for (let i = 0; i < yb.length; i++) {
-        const v = this._micHist[this._micHist.length - yb.length + i] || 0;
-        const h = Math.max(2, Math.min(30, Math.pow(Math.min(1, v * 9), 0.7) * 30));
-        yb[i].style.height = h + 'px';
-        yb[i].classList.toggle('idle', v < 0.004);
-      }
-
-      // ---- SIE: Hüllkurve aus echten Word-Boundary-Events ----
-      if (this.tts.speaking && this._boundCount === 0) this.herEnv = Math.max(this.herEnv || 0, 0.3);
-      this.herEnv = (this.herEnv || 0) * 0.90;
-      const hb = UI.$('wave-her').children;
-      const shape = [0.45, 0.7, 1, 0.8, 0.6, 0.9, 1, 0.75, 0.55, 0.85, 0.95, 0.65, 0.5, 0.4];
-      for (let i = 0; i < hb.length; i++) {
-        const h = Math.max(2, Math.min(30, (this.herEnv || 0) * 30 * shape[i]));
-        hb[i].style.height = h + 'px';
-        hb[i].classList.toggle('idle', (this.herEnv || 0) < 0.03);
-      }
-      const ring = UI.$('voice-ring');
-      if (ring) { ring.style.opacity = Math.min(0.85, (this.herEnv || 0) * 0.9); ring.style.transform = `scale(${0.6 + (this.herEnv || 0) * 0.5})`; }
-      const prog = UI.$('herprog').firstElementChild;
-      if (prog) {
-        const p = this.tts.speaking && this._sentEst ? Math.min(1, (now - this._sentStart) / this._sentEst) : 0;
-        prog.style.width = (p * 100).toFixed(1) + '%';
-      }
-
-      // ---- Barge-in zweiter Kanal: Level-Spike über Noisefloor ----
-      if (this.tts.speaking && this.s.bargeIn && this.vad?.running) {
-        const floor = this.vad.noiseFloor || 0.012;
-        if (lvl > Math.max(0.05, floor * 6)) this._spikeMs = (this._spikeMs || 0) + 16; else this._spikeMs = 0;
-        if (this._spikeMs > 180 && now - (this._lastBarge || 0) > 1500) {
-          this._lastBarge = now; this._spikeMs = 0;
-          this.onSpeechStart(true);
-        }
-      } else this._spikeMs = 0;
-
-      // ---- ASR-Gesundheit ----
-      if (this.s.handsFree && this.asr.supported) {
-        const rec = this.asr.healthTick();
-        if (rec) this.setChip('chip-asr', 'ASR neu gestartet', false, true);
-        const blind = this.asr.wantRunning && !this.tts.speaking &&
-          (now - this.asr.lastFinalAt > 12000) && (now - (this.lastVadSpeechEnd || 0) < 8000);
-        if (blind) {
-          this._asrBlind = (this._asrBlind || 0) + 1;
-          if (this._asrBlind === 90) { this.setChip('chip-asr', 'ASR liefert nichts', false, true); this.asr.healthTick(true); }
-          if (this._asrBlind === 200) { UI.toast('Spracherkennung hört dich nicht – Tipp-Fallback aktiviert', 5000); this.enableTextFallback(); }
-        } else this._asrBlind = 0;
-      }
-    };
-    loop();
-  }
-
-  /* ================= boot ================= */
-  async boot() {
-    this.buildWaves();
-    UI.startClock(UI.$('sb-time'));
-    this.applyPersisted();
-    this.wireStatic();
-    this.buildSettingsSchema();
-    await this.refreshStatus();
-    setInterval(() => this.state === 'idle' && !this.localMode && this.refreshStatus(), 6000);
-    probeOnDevice().then((d) => { this.onDevice = d; this.renderEngineInfo(); });
-    fetch('build_info.json').then(r => r.ok ? r.json() : null).then(j => { this.buildInfo = j; }).catch(() => {});
-    this.checkSecureContext();
-    if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('sw.js').then((reg) => {
-        reg.addEventListener('updatefound', () => {
-          const ni = reg.installing;
-          ni && ni.addEventListener('statechange', () => {
-            if (ni.state === 'installed' && navigator.serviceWorker.controller) {
-              UI.toast('Update geladen – Seite wechselt gleich automatisch');
-            }
-          });
-        });
-      }).catch(() => {});
-    }
-  }
-
-  checkSecureContext() {
-    const ok = window.isSecureContext || ['localhost', '127.0.0.1'].includes(location.hostname);
-    if (ok) return;
-    const gate = UI.el('div', 'gate');
-    gate.innerHTML = `<h2>Kamera &amp; Mikro brauchen HTTPS</h2>
-      <p>Diese Seite wurde über <code>${location.protocol}//${location.host}</code> geladen.
-      Browser erlauben Kamerazugriff nur in einem <i>secure context</i>.</p>
-      <p>Starte den Server mit <code>./run.sh</code> (erzeugt ein selbstsigniertes Zertifikat)
-      und akzeptiere die Warnung im Browser einmalig, oder öffne die Seite über
-      <code>https://&lt;dein-rechner&gt;:8443</code>.</p>
-      <button class="round green" id="gate-ok" style="width:auto;padding:0 22px;height:46px">Trotzdem weiter</button>`;
-    document.getElementById('phone').appendChild(gate);
-    gate.querySelector('#gate-ok').onclick = () => gate.remove();
-  }
-
-  async refreshStatus() {
-    try {
-      const r = await fetch('api/status');
-      this.server = await r.json();
-      const e = this.server.engine || {};
-      const dot = UI.$('engine-dot'), lab = UI.$('engine-label');
-      dot.className = 'dot ' + (e.ready ? 'ok' : e.loading ? 'load' : 'err');
-      const short = String(e.model || '').split('/').pop();
-      lab.textContent = e.ready ? `${e.backend} · ${short}` : e.loading ? `lädt ${short}…` : (e.backend + ' bereit');
-      this.setChip('chip-vlm', 'VLM ' + (e.ready ? e.backend : '…'), !!e.ready);
-      this.renderEngineInfo();
-      if (!this.personas.length && this.server.personas?.length) {
-        this.personas = this.server.personas;
-        this.renderLists();
-        if (this._schema) this.buildSettingsSchema();
-      }
-    } catch (err) {
-      UI.$('engine-label').textContent = 'offline · Demo bereit';
-      UI.$('engine-dot').className = 'dot err';
-      if (!this.personas.length) { this.personas = DEFAULT_PERSONAS; this.renderLists(); }
-    }
-  }
-
-  renderLists() {
-    UI.renderContacts(UI.$('fav-list'), this.personas, (p) => this.call(p));
-    UI.renderContacts(UI.$('contact-list'), this.personas, (p) => this.call(p));
-    this.renderRecents();
-  }
-  renderRecents() {
-    UI.renderRecents(UI.$('recent-list'), UI.$('recent-empty'), this.recents, (p) => this.call(p));
-  }
-
+  /* ================= statische UI ================= */
   wireStatic() {
+    UI.renderContacts(UI.$('fav-list'), PERSONAS, (p) => this.call(p));
+    UI.renderContacts(UI.$('contact-list'), PERSONAS, (p) => this.call(p));
+    this.renderRecents();
     UI.wireTabs([...document.querySelectorAll('.tab')], UI.$('dialer-title'),
       { fav: 'Favoriten', key: 'Keypad', recents: 'Verlauf', contacts: 'Kontakte' });
     UI.renderKeypad(UI.$('keypad'), (d) => {
       const n = UI.$('key-num');
       n.textContent = (n.textContent.trim() + d).slice(0, 16) || '\u00a0';
-      try {
-        const ctx = this._dtmfCtx || (this._dtmfCtx = new (window.AudioContext || window.webkitAudioContext)());
-        const freqs = { '1': [697, 1209], '2': [697, 1336], '3': [697, 1477], '4': [770, 1209], '5': [770, 1336], '6': [770, 1477], '7': [852, 1209], '8': [852, 1336], '9': [852, 1477], '*': [941, 1209], '0': [941, 1336], '#': [941, 1477] };
-        const f = freqs[d]; if (f) {
-          const t = ctx.currentTime, g = ctx.createGain();
-          g.gain.setValueAtTime(0.09, t); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.16);
-          g.connect(ctx.destination);
-          f.forEach((hz) => { const o = ctx.createOscillator(); o.frequency.value = hz; o.connect(g); o.start(t); o.stop(t + 0.17); });
-        }
-      } catch {}
+      UI.dtmf && UI.dtmf(d);
     });
-    UI.$('key-del').onclick = () => {
-      const n = UI.$('key-num');
-      n.textContent = n.textContent.trim().slice(0, -1) || '\u00a0';
-    };
-    UI.$('key-call').onclick = () => this.call(this.currentPersona() || this.personas[0]);
+    UI.$('key-del').onclick = () => { const n = UI.$('key-num'); n.textContent = n.textContent.trim().slice(0, -1) || '\u00a0'; };
+    UI.$('key-call').onclick = () => this.call(this.persona);
     UI.$('btn-settings').onclick = () => this.openSettings();
+    UI.$('btn-engine').onclick = () => this.openSettings();
     UI.$('settings-close').onclick = () => UI.$('settings').classList.remove('on');
-    UI.$('btn-engine').onclick = () => this.openSettings('engine');
 
-    // in-call controls
     UI.$('btn-hangup').onclick = () => this.hangup();
     UI.$('ring-cancel').onclick = () => this.hangup(true);
-    UI.$('ring-accept').onclick = () => this.connectNow();
     UI.$('btn-mute').onclick = (e) => this.toggle(e.currentTarget, (on) => {
-      this.vad.setMuted(!on); if (on) this.asr.start(); else this.asr.stop();
+      this.vad.setMuted(!on);
+      if (on) { if (this.s.handsFree && this.asr.supported) this.asr.start(); } else this.asr.stop();
       UI.toast(on ? 'Mikro an' : 'Mikro stumm');
     });
     UI.$('btn-cam').onclick = (e) => this.toggle(e.currentTarget, (on) => {
       UI.$('mine').classList.toggle('off', !on);
       this.vision.setPaused(!on);
-      this.note(on ? '(Sein Video ist wieder an, du siehst ihn wieder.)' : '(Sein Video ist jetzt aus, du siehst nichts mehr.)');
-      UI.toast(on ? 'Kamera an' : 'Kamera aus – sie sieht nichts mehr');
+      UI.toast(on ? 'Kamera an – sie sieht dich wieder' : 'Kamera aus – sie sieht nichts mehr');
     });
     UI.$('btn-subs').onclick = (e) => this.toggle(e.currentTarget, (on) => {
       this.s.subtitles = on; this.save();
@@ -299,45 +174,32 @@ class App {
       UI.$('btn-freeze').textContent = p ? 'Weiter' : 'Pause';
     };
     UI.$('btn-flip').onclick = () => this.vision.flip().then((f) => {
-      UI.toast(f === 'user' ? 'Frontkamera (gespiegelt wie Selfie)' : 'Rückkamera');
+      UI.toast(f === 'user' ? 'Frontkamera' : 'Rückkamera');
       UI.$('btn-torch').hidden = !this.vision.hasTorch;
       UI.$('btn-torch').dataset.on = 'false';
     });
-    UI.$('btn-torch').onclick = () => {
-      this.vision.setTorch(!this.vision.torch).then((ok) => {
-        UI.$('btn-torch').dataset.on = String(this.vision.torch);
-        if (!ok) UI.toast('Kein Blitz an dieser Kamera verfügbar');
-      });
-    };
-    UI.$('sub-you').onclick = () => this.commitNow();
-
-    document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible' && this.state === 'in-call') UI.keepAwake(true);
+    UI.$('btn-torch').onclick = () => this.vision.setTorch(!this.vision.torch).then((ok) => {
+      UI.$('btn-torch').dataset.on = String(this.vision.torch);
+      if (!ok) UI.toast('Kein Blitz an dieser Kamera verfügbar');
     });
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && this.state === 'in-call') UI.keepAwake(true); });
     window.addEventListener('beforeunload', () => this.hangup(true));
-    UI.$('sb-carrier').textContent = location.hostname === 'localhost' ? 'FastVLM · lokal' : 'FastVLM · ' + location.hostname;
+    UI.$('sb-carrier').textContent = location.hostname === 'localhost' ? 'CHORUS · on-device' : 'CHORUS · ' + location.hostname;
   }
 
-  toggle(btn, fn) {
-    const on = btn.dataset.on !== 'true';
-    btn.dataset.on = String(on);
-    fn(on);
-  }
+  toggle(btn, fn) { const on = btn.dataset.on !== 'true'; btn.dataset.on = String(on); fn(on); }
+  renderRecents() { UI.renderRecents(UI.$('recent-list'), UI.$('recent-empty'), this.recents, (p) => this.call(p)); }
 
-  currentPersona() {
-    const id = this.s.persona;
-    return this.personas.find(p => p.id === id) || null;
-  }
-
-  /* ================= call flow ================= */
+  /* ================= Anruf ================= */
   async call(persona) {
     if (this.state !== 'idle') return;
-    if (!navigator.mediaDevices?.getUserMedia) {
-      UI.toast('Kein Kamerazugriff – HTTPS nötig (siehe Hinweis)'); this.checkSecureContext(); return;
-    }
-    this.persona = persona || this.currentPersona() || { id: 'mara', name: 'Mara', hue: 326 };
+    if (!navigator.mediaDevices?.getUserMedia) { this.checkSecureContext(); return; }
+    this.persona = persona || this.persona;
     this.s.persona = this.persona.id; this.save();
     this.state = 'dialing';
+    this.greeted = false;
+    this.vlmHistory = [];
+    this.act.reset();
     UI.setHue(document.documentElement, this.persona.hue);
     UI.setHue(UI.$('screen-call'), this.persona.hue);
     UI.$('call-name').textContent = this.persona.name;
@@ -351,59 +213,65 @@ class App {
     UI.$('transcript').innerHTML = '';
     this.ring.start();
     UI.$('ringing').classList.add('on');
-    UI.$('ring-accept').style.display = 'none';
     UI.keepAwake(true);
-
-    // media + speech must be started from this gesture
     this.tts.unlock();
-    try {
-      await this.vision.start();
-    } catch (e) {
-      UI.toast('Kamera nicht verfügbar: ' + e.message, 5000);
-    }
-    try {
-      const info = await this.vad.start();
-      this.setChip('chip-vad', 'VAD ' + info.detector, info.detector === 'silero');
-    } catch (e) {
-      UI.toast('Mikro nicht verfügbar: ' + e.message, 5000);
-      this.setChip('chip-vad', 'VAD aus', false, true);
-    }
-    const mode = this.s.engineMode || 'auto';
-    if (mode === 'ondevice') this.startLocal('On-Device-Modus', { vlm: true });
-    else if (mode === 'demo') this.startLocal('Demo-Modus');
-    else { this.connect(); setTimeout(() => { if (this.state === 'dialing' && !this.localMode) this.fallbackLocal('Server nicht erreichbar'); }, 7000); }
-  }
+    this.tts.lang = this.s.lang;
+    this.tts.autoVoice(this.persona.voiceNames || [], this.s.lang);
+    if (this.s.voiceURI) this.tts.setVoiceURI(this.s.voiceURI);
+    this.tts.pitch = this.persona.voicePitch ?? this.s.pitch;
+    this.tts.rate = this.persona.voiceRate ?? this.s.rate;
+    this.tts.volume = this.s.volume;
 
-  connect() {
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const url = `${proto}://${location.host}/ws/call`;
-    let ws;
-    try { ws = new WebSocket(url); } catch (e) { UI.toast('WebSocket: ' + e.message); return; }
-    ws.binaryType = 'arraybuffer';
-    this.ws = ws;
-    ws.onopen = () => {
-      this.setChip('chip-vlm', 'VLM verbunden', true);
-      this.sendObj({
-        t: 'hello', persona: this.persona.id, lang: this.s.lang.slice(0, 2),
-        proactive: this.s.proactive, activation_mode: this.s.activationMode,
-        activation_threshold: this.s.activationThreshold,
-      });
+    const t0 = Date.now();
+    const media = (async () => {
+      try { await this.vision.start(); } catch (e) { UI.toast('Kamera nicht verfügbar: ' + e.message, 5000); }
+      try { await this.vad.start(); } catch (e) {
+        this.setChip('chip-vad', 'VAD nicht verfügbar', false, true);
+        UI.toast('VAD nicht verfügbar: ' + e.message + ' – Spracherkennung übernimmt die Turn-Enden', 5000);
+      }
+    })();
+
+    // On-Device-VLM: sofort, ohne Rückfrage, mit ehrlichem Fortschritt
+    this.vlm = this.vlm && (this.vlm.loading || this.vlm.ready) ? this.vlm : new OnDeviceVLM({ preset: this.s.onDevicePreset });
+    const prog = (msg, p) => {
+      UI.$('ring-state').textContent = 'FastVLM lädt · ' + msg;
+      const bar = UI.$('ring-prog');
+      if (bar) bar.style.width = Math.round((p || 0) * 100) + '%';
+      this._vlmProg = msg;
+      this.renderInfo();
     };
-    ws.onmessage = (ev) => this.dispatch(ev.data);
-    ws.onerror = () => {
+    prog('Tokenizer + Vorverarbeitung…', 0);
+
+    const failLoad = (msg) => {
+      this._vlmError = msg;
+      UI.$('ring-state').textContent = 'FastVLM konnte nicht geladen werden';
+      const bar = UI.$('ring-prog'); if (bar) bar.style.width = '0%';
+      UI.toast('On-Device-VLM: ' + msg, 6000);
       this.setChip('chip-vlm', 'VLM Fehler', false, true);
-      if (!this.localMode && (this.state === 'dialing' || this.state === 'in-call')) this.fallbackLocal('Server nicht erreichbar');
+      this.ring.stop();
+      clearInterval(this._stall);
     };
-    ws.onclose = () => {
-      this.setChip('chip-vlm', 'VLM getrennt', false, true);
-      if (this.localMode) return;
-      if (this.state === 'dialing') this.fallbackLocal('Server nicht erreichbar');
-      else if (this.state === 'in-call') { UI.toast('Verbindung zum Server beendet'); this.hangup(true); }
-    };
+    this._vlmError = null;
+    let lastMsg = '', lastMove = Date.now();
+    clearInterval(this._stall);
+    this._stall = setInterval(() => {
+      if (!this.vlm || this.vlm.ready || this.state === 'idle') { clearInterval(this._stall); return; }
+      if (this._vlmProg !== lastMsg) { lastMsg = this._vlmProg || ''; lastMove = Date.now(); }
+      else if (Date.now() - lastMove > 15000) {
+        failLoad('Ladung bleibt hängen – offline oder CDN blockiert?');
+      }
+    }, 1000);
+    const vlmReady = this.vlm.load(prog).catch((e) => failLoad(String(e && e.message || e)));
+
+    await media;
+    await vlmReady;
+    if (this.state !== 'dialing') return;                 // abgebrochen
+    if (!this.vlm.ready) return;                          // ehrlich stehen bleiben
+    if (Date.now() - t0 < 1600) await new Promise(r => setTimeout(r, 1600 - (Date.now() - t0)));
+    this.enterCall();
   }
 
-  connectNow() {
-    if (this.state !== 'dialing') return;
+  enterCall() {
     this.state = 'in-call';
     this.ring.stop();
     UI.$('ringing').classList.remove('on');
@@ -411,52 +279,37 @@ class App {
     UI.$('screen-call').classList.add('active');
     this.t0 = Date.now();
     clearInterval(this._clockTimer);
-    this._clockTimer = setInterval(() => {
-      UI.$('call-timer').textContent = UI.fmtDur((Date.now() - this.t0) / 1000);
-    }, 500);
+    this._clockTimer = setInterval(() => { UI.$('call-timer').textContent = UI.fmtDur((Date.now() - this.t0) / 1000); }, 500);
+    this.setChip('chip-vlm', `VLM ${this.vlm.device} · ${this.vlm.preset}`, true);
+    this.setChip('chip-pro', this.s.proactive ? 'Initiative an' : 'Initiative aus', this.s.proactive);
     if (this.s.handsFree && this.asr.supported) this.asr.start();
-    else if (!this.asr.supported) this.enableTextFallback();
+    else this.setChip('chip-asr', 'ASR nicht verfügbar', false, true);
+    this.addSys(`verbunden · FastVLM-0.5B on-device (${this.vlm.device})`);
     this.renderAudio();
-    this.addSys(`verbunden · ${this.server?.engine?.backend || '?'} · ${this.server?.engine?.model?.split('/').pop() || ''}`);
-  }
-
-  enableTextFallback() {
-    if (UI.$('text-input')) return;
-    const box = UI.el('div');
-    box.id = 'text-input';
-    box.style.cssText = 'position:absolute;left:8px;right:8px;bottom:96px;display:flex;gap:6px;z-index:8';
-    box.innerHTML = `<input type="text" placeholder="Tippen statt sprechen…" style="flex:1;background:#151a24;border:1px solid #232a38;color:#eef1f7;border-radius:12px;padding:10px 12px;font-size:14px">
-      <button style="background:#3b9dff;color:#fff;border-radius:12px;padding:0 16px;font-weight:600">Senden</button>`;
-    UI.$('screen-call').appendChild(box);
-    const inp = box.querySelector('input'), btn = box.querySelector('button');
-    const send = () => { const v = inp.value.trim(); if (!v) return; inp.value = ''; this.pushUser(v); };
-    btn.onclick = send;
-    inp.onkeydown = (e) => { if (e.key === 'Enter') send(); };
-    UI.toast('Spracherkennung nicht verfügbar – Tippen aktiviert', 4500);
+    clearInterval(this._actTimer);
+    this._actTimer = setInterval(() => this.proactiveTick(), 2500);
+    this.lastExchange = performance.now();
+    if (!this.greeted) { this.greeted = true; this.vlmTurn('greeting', ''); }
   }
 
   async hangup(silent = false) {
     if (this.state === 'idle') return;
     const seconds = this.t0 ? (Date.now() - this.t0) / 1000 : 0;
-    if (this.persona && seconds > 1) {
-      this.recents.unshift({ persona: this.persona, seconds, at: Date.now(), missed: seconds < 3 });
-      this.recents = this.recents.slice(0, 30);
-      this.renderRecents();
-    }
+    if (seconds > 1) { this.recents.unshift({ persona: this.persona, seconds, at: Date.now(), missed: seconds < 3 }); this.recents = this.recents.slice(0, 30); this.renderRecents(); }
     this.state = 'idle';
     this.ring.stop();
     clearInterval(this._clockTimer);
+    clearInterval(this._actTimer);
+    clearInterval(this._stall);
     clearTimeout(this.commitTimer);
+    cancelAnimationFrame(this._rafId);
     this.tts.cancel();
     this.asr.stop();
     this.vad.stop();
     this.vision.stop();
-    cancelAnimationFrame(this._rafId);
-    this.herEnv = 0;
+    this.vlm && this.vlm.cancel();
+    this.vlmBusy = false;
     UI.keepAwake(false);
-    try { this.sendObj({ t: 'bye' }); } catch {}
-    try { this.ws && this.ws.close(); } catch {}
-    this.ws = null;
     UI.$('ringing').classList.remove('on');
     UI.$('her').classList.remove('speaking', 'listening');
     UI.$('transcript').classList.remove('on');
@@ -466,108 +319,44 @@ class App {
     this.pendingText = '';
     this.subHer(''); this.subYou('');
     if (!silent) UI.toast(`Anruf beendet · ${UI.fmtDur(seconds)}`);
-    this.refreshStatus();
   }
 
-  /* ================= transport ================= */
-  sendObj(o) {
-    if (this.localMode) {
-      if (this.vlm && (o.t === 'say' || o.t === 'probe')) {
-        this.vlmTurn(o.t === 'probe' ? 'probe' : 'user', o.text || '');
-        return true;
-      }
-      this.local && this.local.post(o);
-      return true;
-    }
-    if (this.ws && this.ws.readyState === 1) { this.ws.send(JSON.stringify(o)); return true; }
-    return false;
+  /* ================= proactive (StreamBridge-Scorer) ================= */
+  proactiveTick() {
+    if (this.state !== 'in-call' || !this.s.proactive) return;
+    if (this.vlmBusy || this.tts.speaking || this.vad?.gate?.speaking) return;
+    const st = this.act.observe(this.vision.grab, {
+      now: performance.now(),
+      userSpeaking: this.vad?.gate?.speaking || false,
+      sheSpeaking: this.tts.speaking,
+      lastExchange: this.lastExchange,
+    });
+    this.setChip('chip-pro', st.speak ? 'Initiative: spricht!' : `Initiative ${(st.score * 100) | 0}%`, st.score > this.s.activationThreshold * 0.85);
+    if (st.speak) { this.act.fire(); this.vlmTurn('proactive', ''); }
   }
 
-  startLocal(reason, opts = {}) {
-    if (this.localMode) return;
-    this.localMode = true;
-    try { this.ws && this.ws.close(); } catch {}
-    this.ws = null;
-    const base = DEFAULT_PERSONAS.find(x => x.id === (this.persona?.id || 'mara')) || DEFAULT_PERSONAS[0];
-    this.local = new LocalEngine(this, { ...base, ...(this.persona || {}) });
-    this.local.onProactive = () => this.vlmTurn('proactive', '');
-    this.vlmHistory = [];
-    this._si = 0;
-    UI.toast(reason + (opts.vlm ? ' → On-Device-VLM wird geladen' : ' → On-Device-Demomodus (ohne Server)'));
-    this.setChip('chip-vlm', opts.vlm ? 'VLM lädt…' : 'VLM on-device', true);
-    if (opts.vlm) this.initVlm();
-    this.local.post({ t: 'hello', persona: base.id, lang: this.s.lang.slice(0, 2) });
-    if (this.state === 'dialing') this.connectNow();
-  }
-
-  async initVlm() {
-    this.vlm = new OnDeviceVLM({ preset: this.s.onDevicePreset, device: this.s.onDeviceDevice || 'auto' });
-    try {
-      await this.vlm.load((msg, p) => {
-        this._vlmProg = msg;
-        this.setChip('chip-vlm', `VLM ${(p * 100) | 0}%`, true);
-        this.renderEngineInfo();
-      });
-      this.setChip('chip-vlm', `VLM on-device (${this.vlm.device})`, true);
-      UI.toast(`On-Device-VLM bereit (${this.vlm.device}, ${(this.vlm.loadMs / 1000).toFixed(0)} s)`);
-    } catch (e) {
-      this.vlm = null;
-      UI.toast('On-Device-VLM fehlgeschlagen: ' + (e.message || e) + ' → Regel-Charakter');
-      this.setChip('chip-vlm', 'VLM on-device (Regeln)', true);
-    }
-    this.renderEngineInfo();
-  }
-
-  /** Auto-Fallback: Server weg → erst fragen, ob das echte On-Device-VLM laufen soll */
-  fallbackLocal(reason) {
-    const sup = onDeviceSupported();
-    if (sup.webgpu && !this._askedVlm && this.s.engineMode === 'auto') {
-      this._askedVlm = true;
-      this.askOnDevice(reason);
-      return;
-    }
-    this.startLocal(reason);
-  }
-
-  askOnDevice(reason) {
-    const mb = PRESET_MB[this.s.onDevicePreset] || 676;
-    const g = UI.el('div', 'gate');
-    g.innerHTML = `<h2>On-Device-VLM laden?</h2>
-      <p>Kein Server erreichbar. Soll FastVLM-0.5B <b>direkt auf diesem Gerät</b> laufen
-      (WebGPU, einmalig ~${mb} MB Download, danach Cache)? Sonst läuft der Charakter
-      serverlos im Regel-Modus.</p>
-      <div style="display:flex;gap:12px">
-        <button class="round green" id="od-yes" style="width:auto;padding:0 20px;height:46px">VLM laden</button>
-        <button class="round ghost" id="od-no" style="width:auto;padding:0 20px;height:46px;border:1px solid #232a38">Nur Demo</button>
-      </div>`;
-    document.getElementById('phone').appendChild(g);
-    g.querySelector('#od-yes').onclick = () => { g.remove(); this.startLocal(reason, { vlm: true }); };
-    g.querySelector('#od-no').onclick = () => { g.remove(); this.startLocal(reason); };
-  }
-
-  /** Ein kompletter VLM-Turn on-device: streamt Tokens → Sätze → TTS */
+  /* ================= der eine, echte Turn-Pfad ================= */
   async vlmTurn(reason, text) {
-    if (!this.vlm || !this.vlm.ready) return this.local && this.local.turn(reason, text);
-    if (this.vlmBusy) return;
+    if (!this.vlm || !this.vlm.ready || this.vlmBusy) return;
     this.vlmBusy = true;
     this._si = 0;
+    this.herBubble = null; this.herPending = '';
     this.dispatch({ t: 'status', state: 'thinking', reason });
-    const p = this.local?.p || this.persona || {};
-    const sys = CHARACTER_SYSTEM(p, this.s.lang);
-    const directive = reason === 'proactive' ? PROACTIVE_DIRECTIVE : text;
+    const dir = directives(this.s.lang);
+    const userText = reason === 'proactive' ? dir.proactive : reason === 'greeting' ? dir.greet : text;
     let sentBuf = '', all = '';
     const t0 = performance.now();
     try {
       const full = await this.vlm.generate({
-        system: sys,
-        history: (this.vlmHistory || []).slice(-6),
-        userText: directive,
-        canvas: this.vision?.grab,
+        system: characterSystem(this.persona, this.s.lang),
+        history: this.vlmHistory.slice(-6),
+        userText,
+        canvas: this.vision.grab,                 // exakt der angezeigte Frame
         maxTokens: this.s.turbo ? 48 : 96,
-        onDelta: (t) => {
-          all += t;
-          this.dispatch({ t: 'delta', text: t });
-          sentBuf += t;
+        onDelta: (tk) => {
+          all += tk;
+          this.dispatch({ t: 'delta', text: tk });
+          sentBuf += tk;
           const r = splitSentences(sentBuf);
           r.out.forEach((snt) => { if (snt) this.dispatch({ t: 'sentence', text: snt, i: ++this._si }); });
           sentBuf = r.rest;
@@ -576,57 +365,33 @@ class App {
       });
       if (sentBuf.trim()) this.dispatch({ t: 'sentence', text: sentBuf.trim(), i: ++this._si });
       const clean = (full || all).trim();
-      if (reason !== 'proactive' && text) (this.vlmHistory = this.vlmHistory || []).push(['user', text]);
-      if (clean) (this.vlmHistory = this.vlmHistory || []).push(['assistant', clean]);
-      this.dispatch({ t: 'turn_end', text: clean, reason, ms: performance.now() - t0, ttft_ms: 0, frames_seen: this.vision?.frameId || 0 });
+      if (reason === 'user' && text) this.vlmHistory.push(['user', text]);
+      else if (reason !== 'user') this.vlmHistory.push(['user', '(Stille)']);
+      if (clean) this.vlmHistory.push(['assistant', clean]);
+      this.dispatch({ t: 'turn_end', text: clean, reason, ms: performance.now() - t0 });
     } catch (e) {
-      if (!/__cancelled__/.test(String(e && e.message))) {
-        UI.toast('On-Device-VLM: ' + (e.message || e));
-        this.dispatch({ t: 'error', message: 'on-device: ' + (e.message || e), fatal: false });
+      const msg = String(e && e.message || e);
+      if (!/__cancelled__/.test(msg)) {
+        this.dispatch({ t: 'error', message: 'VLM: ' + msg });
+        this.setChip('chip-vlm', 'VLM Fehler', false, true);
       } else {
-        this.dispatch({ t: 'turn_end', text: all.trim(), reason, ms: performance.now() - t0, ttft_ms: 0, frames_seen: 0 });
+        this.dispatch({ t: 'turn_end', text: all.trim(), reason, ms: performance.now() - t0 });
       }
     }
     this.vlmBusy = false;
-    this.dispatch({ t: 'status', state: 'idle', reason: 'turn_end' });
+    this.lastExchange = performance.now();
+    this.dispatch({ t: 'status', state: 'idle' });
   }
 
-  dispatch(raw) {
-    let m = raw;
-    if (typeof raw === 'string') { try { m = JSON.parse(raw); } catch { return; } }
-    this.onMsg(m);
-  }
-
-  onWs(raw) { this.dispatch(raw); }
-
-  onMsg(m) {
+  dispatch(m) {
     switch (m.t) {
-      case 'welcome':
-        this.sid = m.sid; break;
-      case 'ready': {
-        this.serverReady = m;
-        const e = m.engine || {};
-        this.setChip('chip-vlm', `VLM ${e.backend}${e.ready ? '' : ' (lädt)'}`, !!e.ready, !e.ready);
-        this.setChip('chip-pro', this.s.proactive ? 'Initiative ' + this.s.activationMode : 'Initiative aus', this.s.proactive);
-        if (m.persona?.voice) {
-          const v = m.persona.voice;
-          this.tts.pitch = v.pitch ?? this.s.pitch;
-          this.tts.rate = v.rate ?? this.s.rate;
-          this.tts.volume = this.s.volume;
-          this.tts.lang = this.s.lang;
-          this.tts.autoVoice(v.names || [], this.s.lang);
-          if (this.s.voiceURI) this.tts.setVoiceURI(this.s.voiceURI);
-        }
-        if (this.state === 'dialing') this.connectNow();
-        break;
-      }
       case 'status':
         if (m.state === 'thinking') { UI.$('call-state').textContent = 'denkt nach…'; this.setChip('chip-vlm', 'VLM denkt…', true); }
-        else { UI.$('call-state').textContent = this.s.handsFree ? 'hört zu' : 'verbunden'; this.setChip('chip-vlm', 'VLM bereit', true); }
+        else { UI.$('call-state').textContent = this.s.handsFree ? 'hört zu' : 'verbunden'; if (this.vlm?.ready) this.setChip('chip-vlm', `VLM ${this.vlm.device}`, true); }
         break;
       case 'delta':
-        if (!this.herBubble) this.herBubble = this.addMsg('her', this.persona?.name || 'Sie', '');
-        this.herPending = (this.herPending || '') + m.text;
+        if (!this.herBubble) this.herBubble = this.addMsg('her', this.persona.name, '');
+        this.herPending += m.text;
         this.herBubble.querySelector('.txt').textContent = this.herPending.slice(0, 400);
         this.subHer(m.text);
         this.scrollTranscript();
@@ -636,221 +401,190 @@ class App {
         this.subHer(m.text);
         break;
       case 'turn_end': {
-        this.lastTurnMs = m.ms;
         if (this.herBubble) this.herBubble.querySelector('.txt').textContent = m.text;
-        else if (m.text) this.addMsg('her', this.persona?.name || 'Sie', m.text);
+        else if (m.text) this.addMsg('her', this.persona.name, m.text);
         this.herBubble = null; this.herPending = '';
         this.subHer(m.text);
-        const e = this.server?.engine || {};
-        this.setChip('chip-vlm', `VLM ${Math.round(m.ttft_ms || m.ms)} ms · ${e.backend || '?'}`, true);
+        if (m.ms) { this.perf.ttft = m.ms; this.setChip('chip-vlm', `VLM ${Math.round(m.ms)} ms · ${this.vlm?.device}`, true); }
         if (m.reason === 'proactive') this.addSys('sie hat von selbst gesprochen');
+        this.renderInfo();
         this.scrollTranscript();
         break;
       }
-      case 'cancelled':
-        this.herBubble = null; this.herPending = ''; break;
-      case 'activation':
-        this.lastActivation = m;
-        this.setChip('chip-pro', m.speak ? 'Initiative: spricht!' :
-          `Initiative ${(m.score * 100) | 0}% · ${m.mode}`, m.score > this.s.activationThreshold * 0.85);
-        break;
-      case 'scene':
-        this.lastScene = m.text;
-        break;
-      case 'probe_vote':
-        break;
-      case 'ttft_ms':
-        this.perf.ttft.push(m.ms); this.perf.ttft = this.perf.ttft.slice(-12);
-        this.setChip('chip-vlm', `VLM TTFT ${Math.round(m.ms)} ms`, true);
-        this.renderEngineInfo();
-        break;
       case 'error':
-        UI.toast('Server: ' + m.message, 4500);
-        this.setChip('chip-vlm', 'VLM Fehler', false, true);
-        break;
-      case 'log':
-        if (m.level !== 'info') console.warn('[server]', m.msg);
-        break;
-      case 'ack_frame':
-        break;
-      case 'pong': case 'keepalive':
+        UI.toast(m.message, 5000);
         break;
     }
   }
 
-  sendFrame(id, buf, meta) {
-    if (this.localMode) { this.local && this.local.observe(); return; }
-    if (!this.ws || this.ws.readyState !== 1) return;
-    try {
-      this.ws.send(JSON.stringify({ t: 'frame_meta', id, ts: meta.ts, w: meta.w, h: meta.h, bytes: meta.bytes }));
-      this.ws.send(buf);
-    } catch (e) { /* drop frame */ }
-  }
-
-  note(text) { this.sendObj({ t: 'note', text }); }
-
-  onVisionStats(st) {
-    UI.$('hud-frame').textContent = `frame #${st.id}`;
-    UI.$('hud-size').textContent = `${st.w}×${st.h} · ${st.kb} KB`;
-    UI.$('hud-rate').textContent = `${st.fps.toFixed(2)} fps → modell`;
-    UI.$('chip-vlm').title = `Kamera ${st.src} · ${st.facing} · ${st.mirror ? 'gespiegelt' : 'ungespiegelt'} · torch ${st.torch ? 'an' : 'aus'}`;
-    const tb = UI.$('btn-torch');
-    if (tb) { tb.hidden = !st.hasTorch; tb.dataset.on = String(st.torch); }
-  }
-
-  /* ================= voice loop ================= */
-  onLevel(rms, p) {
-    this.setChip('chip-asr', `ASR ${this.asr.wantRunning ? (this.asr.pausedForTTS ? 'wartet' : 'läuft') : 'aus'} · Mic ${(p * 100) | 0}%`, p > 0.4);
-  }
-
-  onSpeechStart(fromSpike = false) {
-    if (this.state !== 'in-call') return;
-    if (fromSpike && this.tts.speaking) this.addSys('barge-in über Mikro-Pegel');
-    this.sendObj({ t: 'vad', speaking: true });
-    UI.$('her').classList.add('listening');
-    if (this.tts.speaking && this.s.bargeIn) {
-      this.tts.cancel();
-      this.sendObj({ t: 'interrupt', reason: 'barge-in' });
-      this.addSys('du hast sie unterbrochen');
-      if (this.s.halfDuplex) this.asr.setPausedForTTS(false);
-    }
-    if (!this.asr.wantRunning && this.s.handsFree && !this.tts.speaking) this.asr.start();
-  }
-
-  onSpeechEnd(e) {
-    this.lastVadSpeechEnd = performance.now();
-    this.sendObj({ t: 'vad', speaking: false });
-    UI.$('her').classList.remove('listening');
-    if (e.tooShort) return;
-    this.scheduleCommit(560);
-  }
-
-  scheduleCommit(ms) {
-    clearTimeout(this.commitTimer);
-    this.commitTimer = setTimeout(() => this.commitNow(), ms);
-  }
-
+  /* ================= Hören: ASR + VAD + Barge-in ================= */
   onAsrFinal(text) {
     this.pendingText = (this.pendingText + ' ' + text).trim();
     this.subYou(this.pendingText);
-    this.scheduleCommit(this.vad.gate.speaking ? 900 : 620);
+    clearTimeout(this.commitTimer);
+    this.commitTimer = setTimeout(() => this.commitNow(), this.vad?.gate?.speaking ? 900 : 620);
   }
-
   commitNow() {
     clearTimeout(this.commitTimer);
     const text = this.pendingText.trim();
     this.pendingText = '';
-    if (!text) { this.subYou(''); return; }
-    if (this.state !== 'in-call') return;
-    this.pushUser(text);
-  }
-
-  pushUser(text) {
-    this.addMsg('you', 'Du', text);
     this.subYou('');
+    if (!text || this.state !== 'in-call') return;
+    this.addMsg('you', 'Du', text);
     this.scrollTranscript();
     this.commitAt = performance.now();
-    this.sendObj({ t: 'say', text, final: true });
     UI.$('call-state').textContent = 'denkt nach…';
+    this.vlmTurn('user', text);
+  }
+  onSpeechStart(fromSpike = false) {
+    if (this.state !== 'in-call') return;
+    UI.$('her').classList.add('listening');
+    if (this.tts.speaking && this.s.bargeIn) {
+      if (fromSpike) this.addSys('barge-in über Mikro-Pegel');
+      this.tts.cancel();
+      this.vlm && this.vlm.cancel();
+      this.vlmBusy = false;
+      this.herBubble = null; this.herPending = '';
+      if (this.s.halfDuplex) this.asr.setPausedForTTS(false);
+    }
+    if (!this.asr.wantRunning && this.s.handsFree && this.asr.supported && !this.tts.speaking) this.asr.start();
+  }
+  onSpeechEnd(e) {
+    this.lastExchange = performance.now();
+    UI.$('her').classList.remove('listening');
+    if (e.tooShort) return;
+    clearTimeout(this.commitTimer);
+    this.commitTimer = setTimeout(() => this.commitNow(), 560);
+  }
+  onLevel(rms, p) {
+    this.setChip('chip-asr', `ASR ${this.asr.wantRunning ? (this.asr.pausedForTTS ? 'wartet' : 'läuft') : 'aus'} · Mic ${(p * 100) | 0}%`, p > 0.4);
   }
 
-  /* ================= TTS state ================= */
+  /* ================= echte Pegel ================= */
+  renderAudio() {
+    cancelAnimationFrame(this._rafId);
+    const loop = () => {
+      this._rafId = requestAnimationFrame(loop);
+      if (this.state !== 'in-call') return;
+      const now = performance.now();
+
+      const lvl = this.vad?.running ? this.vad.level : 0;
+      this._micHist = (this._micHist || []).concat(lvl).slice(-10);
+      const yb = UI.$('wave-you').children;
+      for (let i = 0; i < yb.length; i++) {
+        const v = this._micHist[this._micHist.length - yb.length + i] || 0;
+        yb[i].style.height = Math.max(2, Math.min(30, Math.pow(Math.min(1, v * 9), 0.7) * 30)) + 'px';
+        yb[i].classList.toggle('idle', v < 0.004);
+      }
+
+      if (this.tts.speaking && !this._boundCount) this.herEnv = Math.max(this.herEnv || 0, 0.3);
+      this.herEnv = (this.herEnv || 0) * 0.90;
+      const hb = UI.$('wave-her').children;
+      const shape = [0.45, 0.7, 1, 0.8, 0.6, 0.9, 1, 0.75, 0.55, 0.85, 0.95, 0.65, 0.5, 0.4];
+      for (let i = 0; i < hb.length; i++) {
+        hb[i].style.height = Math.max(2, Math.min(30, (this.herEnv || 0) * 30 * shape[i])) + 'px';
+        hb[i].classList.toggle('idle', (this.herEnv || 0) < 0.03);
+      }
+      const ring = UI.$('voice-ring');
+      if (ring) { ring.style.opacity = Math.min(0.85, (this.herEnv || 0) * 0.9); ring.style.transform = `scale(${0.6 + (this.herEnv || 0) * 0.5})`; }
+      const prog = UI.$('herprog').firstElementChild;
+      if (prog) prog.style.width = (this.tts.speaking && this._sentEst ? Math.min(1, (now - this._sentStart) / this._sentEst) * 100 : 0).toFixed(1) + '%';
+
+      // Barge-in-Kanal 2: echter Pegel-Spike über dem adaptiven Noisefloor
+      if (this.tts.speaking && this.s.bargeIn && this.vad?.running) {
+        const floor = this.vad.noiseFloor || 0.012;
+        if (lvl > Math.max(0.05, floor * 6)) this._spikeMs = (this._spikeMs || 0) + 16; else this._spikeMs = 0;
+        if (this._spikeMs > 180 && now - (this._lastBarge || 0) > 1500) { this._lastBarge = now; this._spikeMs = 0; this.onSpeechStart(true); }
+      } else this._spikeMs = 0;
+
+      if (this.s.handsFree && this.asr.supported && this.asr.healthTick()) {
+        this.setChip('chip-asr', 'ASR neu gestartet', false, true);
+      }
+    };
+    loop();
+  }
+
   onTtsStart(text) {
-    this._boundCount = 0;
-    this._sentStart = performance.now();
-    this._sentEst = 600 + ((text || '').length / Math.max(0.4, this.tts.rate)) * 62;
-    this.herEnv = 0.7;
     if (this.commitAt) {
       const ttfa = performance.now() - this.commitAt;
       this.perf.ttfa.push(ttfa); this.perf.ttfa = this.perf.ttfa.slice(-12);
       this.commitAt = 0;
       this.setChip('chip-vlm', `Stimme nach ${(ttfa / 1000).toFixed(1)} s`, true);
-      this.renderEngineInfo();
+      this.renderInfo();
     }
+    this._boundCount = 0;
+    this._sentStart = performance.now();
+    this._sentEst = 600 + ((text || '').length / Math.max(0.4, this.tts.rate)) * 62;
+    this.herEnv = 0.7;
     UI.$('her').classList.add('speaking');
     UI.$('her').classList.remove('listening');
     this.vad.setSheSpeaks(true);
     if (this.s.halfDuplex) this.asr.setPausedForTTS(true);
     UI.$('call-state').textContent = 'spricht…';
   }
-  onTtsEnd(cancelled) {
+  onTtsEnd() {
     this.herEnv = 0;
     const prog = UI.$('herprog') && UI.$('herprog').firstElementChild;
     if (prog) prog.style.width = '0%';
     UI.$('her').classList.remove('speaking');
     this.vad.setSheSpeaks(false);
-    if (this.s.halfDuplex && !cancelled) this.asr.setPausedForTTS(false);
-    if (cancelled && this.s.halfDuplex) this.asr.setPausedForTTS(false);
+    if (this.s.halfDuplex) this.asr.setPausedForTTS(false);
     UI.$('call-state').textContent = this.s.handsFree ? 'hört zu' : 'verbunden';
-    document.querySelectorAll('#wave i').forEach(b => b.style.height = '');
   }
   onBoundary(e) {
-    // echtes Wort-Event der System-TTS -> Hüllkurve ansteuern
     this._boundCount = (this._boundCount || 0) + 1;
     this.herEnv = 1;
-    if (e && typeof e.charIndex === 'number' && this._sentEst) {
-      const txt = this._curTtsText || '';
-      if (txt.length) this._sentStart = performance.now() - (e.charIndex / txt.length) * this._sentEst;
-    }
   }
 
-  /* ================= transcript / subtitles ================= */
+  /* ================= Transcript / Untertitel / Chips ================= */
   addMsg(who, name, text) {
-    const box = UI.$('transcript');
     const d = UI.el('div', 'msg ' + who, `<b>${name}</b><span class="txt"></span>`);
     d.querySelector('.txt').textContent = text;
-    box.appendChild(d);
+    UI.$('transcript').appendChild(d);
     return d;
   }
-  addSys(text) {
-    const box = UI.$('transcript');
-    box.appendChild(UI.el('div', 'msg sys', text));
-  }
-  scrollTranscript() {
-    const box = UI.$('transcript');
-    box.scrollTop = box.scrollHeight;
-  }
-  subHer(t) {
-    if (!this.s.subtitles) return;
-    const n = UI.$('sub-her');
-    n.textContent = t || '\u00a0';
-    n.classList.toggle('blank', !t);
-  }
-  subYou(t) {
-    const n = UI.$('sub-you');
-    n.textContent = t ? '🎙 ' + t : '\u00a0';
-    n.classList.toggle('blank', !t);
-  }
+  addSys(text) { UI.$('transcript').appendChild(UI.el('div', 'msg sys', text)); }
+  scrollTranscript() { const b = UI.$('transcript'); b.scrollTop = b.scrollHeight; }
+  subHer(t) { if (!this.s.subtitles) return; const n = UI.$('sub-her'); n.textContent = t || '\u00a0'; }
+  subYou(t) { const n = UI.$('sub-you'); n.textContent = t ? '🎙 ' + t : '\u00a0'; }
   setChip(id, text, hot = false, warn = false) {
     const c = UI.$(id);
-    if (!c || c.textContent === text) { if (c) { c.className = 'chip' + (warn ? ' hot' : hot ? ' live' : ''); } return; }
+    if (!c) return;
     c.textContent = text;
     c.className = 'chip' + (warn ? ' hot' : hot ? ' live' : '');
   }
+  toastOnce(key, msg) {
+    const now = Date.now();
+    if (this['_to_' + key] && now - this['_to_' + key] < 8000) return;
+    this['_to_' + key] = now;
+    UI.toast(msg, 4000);
+  }
+  onVisionStats(st) {
+    UI.$('hud-frame').textContent = `frame #${st.id}`;
+    UI.$('hud-size').textContent = `${st.w}×${st.h} · live`;
+    UI.$('hud-rate').textContent = `${st.fps.toFixed(2)} fps → VLM`;
+    const tb = UI.$('btn-torch');
+    if (tb) { tb.hidden = !st.hasTorch; tb.dataset.on = String(st.torch); }
+    UI.$('chip-vlm').title = `Kamera ${st.src} · ${st.facing} · ${st.mirror ? 'gespiegelt' : 'ungespiegelt'} · torch ${st.torch ? 'an' : 'aus'}`;
+  }
 
-  /* ================= settings ================= */
+  /* ================= Settings ================= */
   save() { localStorage.setItem(KEY, JSON.stringify(this.s)); }
   applyPersisted() {
     document.querySelector('.subs').style.display = this.s.subtitles ? '' : 'none';
     UI.$('btn-subs').dataset.on = String(this.s.subtitles);
-    UI.$('btn-cam').dataset.on = 'true';
-    UI.$('btn-mute').dataset.on = 'true';
     UI.$('modelview').classList.toggle('nosmooth', this.s.pixelExact);
     this.tts.rate = this.s.rate; this.tts.pitch = this.s.pitch; this.tts.volume = this.s.volume;
     this.tts.lang = this.s.lang;
   }
 
   buildSettingsSchema() {
-    const schema = [
-      { group: 'Engine' },
-      { type: 'info', key: 'engine', rows: [['Backend', '…'], ['Modell', '…'], ['Bereit', '…']] },
-      { type: 'button', key: 'warm', label: 'Modell jetzt laden', buttonLabel: 'Laden' },
+    this._schema = [
       { group: 'Charakter' },
-      { type: 'select', key: 'persona', label: 'Kontakt', options: (this.personas.length ? this.personas : [{ id: 'mara', name: 'Mara' }]).map(p => ({ value: p.id, label: `${p.name}, ${p.age || ''} · ${p.city || ''}` })) },
+      { type: 'select', key: 'persona', label: 'Kontakt', options: PERSONAS.map(p => ({ value: p.id, label: `${p.name}, ${p.age} · ${p.city}` })) },
       { type: 'select', key: 'lang', label: 'Sprache', options: [{ value: 'de-DE', label: 'Deutsch' }, { value: 'en-US', label: 'English' }] },
-      { type: 'switch', key: 'proactive', label: 'Sie redet von selbst', desc: 'StreamBridge-Aktivierungsmodell: beobachtet dein Video und kommentiert spontan, wenn sich etwas tut oder Pause ist.' },
-      { type: 'select', key: 'activationMode', label: 'Aktivierungsmodus', options: [{ value: 'hybrid', label: 'hybrid (CV + VLM-Probe)' }, { value: 'heuristic', label: 'nur Bildänderung (schnell)' }, { value: 'vlm', label: 'nur FastVLM-Entscheid' }, { value: 'off', label: 'aus' }] },
-      { type: 'range', key: 'activationThreshold', label: 'Schwelle', attrs: { min: 0.3, max: 0.95, step: 0.01 }, fmt: v => (v * 100).toFixed(0) + '%' },
+      { type: 'switch', key: 'proactive', label: 'Sie redet von selbst', desc: 'Aktivierungs-Scorer (StreamBridge-Konzept): beobachtet die echten Frames und die Gesprächspause. WAS sie sagt, generiert immer das VLM.' },
+      { type: 'range', key: 'activationThreshold', label: 'Initiative-Schwelle', attrs: { min: 0.3, max: 0.95, step: 0.01 }, fmt: v => (v * 100).toFixed(0) + '%' },
       { type: 'range', key: 'activationCooldown', label: 'Mindestabstand', attrs: { min: 5, max: 90, step: 1 }, fmt: v => v + ' s' },
 
       { group: 'Ihre Stimme (System-TTS)' },
@@ -859,64 +593,38 @@ class App {
       { type: 'range', key: 'pitch', label: 'Höhe', attrs: { min: 0.6, max: 1.6, step: 0.02 }, fmt: v => v.toFixed(2) },
       { type: 'range', key: 'volume', label: 'Lautstärke', attrs: { min: 0, max: 1, step: 0.05 }, fmt: v => (v * 100).toFixed(0) + '%' },
 
-      { group: 'Dein Mikro (Hands-free)' },
-      { type: 'switch', key: 'handsFree', label: 'Hands-free sprechen', desc: 'Freihändig: Voice-Activity-Detection + System-Spracherkennung. Ohne Spracherkennung erscheint ein Tippfeld.' },
-      { type: 'switch', key: 'neuralVad', label: 'Neuronale VAD (Silero)', desc: 'Sonst adaptive Energie-/Nulldurchgangs-VAD. Wird automatisch genutzt, wenn das ONNX-Modell nicht lädt.' },
+      { group: 'Dein Mikro' },
+      { type: 'switch', key: 'handsFree', label: 'Hands-free (System-ASR)' },
       { type: 'range', key: 'vadOnset', label: 'VAD-Empfindlichkeit', attrs: { min: 0.15, max: 0.9, step: 0.01 }, fmt: v => v.toFixed(2) },
-      { type: 'range', key: 'vadHangover', label: 'Sprechpause bis Antwort', attrs: { min: 200, max: 1500, step: 20 }, fmt: v => v + ' ms' },
-      { type: 'switch', key: 'halfDuplex', label: 'Halbduplex', desc: 'Spracherkennung pausiert, während sie spricht – verhindert, dass sie sich selbst hört. Unterbrechen (Barge-in) geht trotzdem.' },
-      { type: 'switch', key: 'bargeIn', label: 'Unterbrechen erlaubt', desc: 'Wenn du lossprichst, während sie redet, bricht sie ab.' },
+      { type: 'range', key: 'vadHangover', label: 'Pause bis Turn-Ende', attrs: { min: 200, max: 1500, step: 20 }, fmt: v => v + ' ms' },
+      { type: 'switch', key: 'halfDuplex', label: 'Halbduplex', desc: 'Erkennung pausiert, während sie spricht. Barge-in bleibt über VAD und Pegel-Spike aktiv.' },
+      { type: 'switch', key: 'bargeIn', label: 'Unterbrechen erlaubt' },
 
-      { group: 'Bild für FastVLM' },
+      { group: 'Bild (exakt das, was das VLM sieht)' },
       { type: 'select', key: 'frameSize', label: 'Auflösung', options: [384, 512, 640, 768, 1024].map(v => ({ value: v, label: v + ' px' })) },
-      { type: 'select', key: 'ratio', label: 'Ausschnitt', options: [{ value: '1:1', label: 'Quadrat (exakt wie FastVLM croppt)' }, { value: '4:3', label: '4:3' }, { value: '16:9', label: '16:9' }] },
-      { type: 'range', key: 'intervalMs', label: 'Frame-Intervall', attrs: { min: 300, max: 4000, step: 100 }, fmt: v => v + ' ms (' + (1000 / v).toFixed(1) + ' fps)' },
-      { type: 'range', key: 'quality', label: 'JPEG-Qualität', attrs: { min: 0.4, max: 0.95, step: 0.05 }, fmt: v => (v * 100).toFixed(0) + '%' },
-      { type: 'select', key: 'cameraFacing', label: 'Standard-Kamera', options: [
-        { value: 'environment', label: 'Rückkamera (Standard)' },
-        { value: 'user', label: 'Frontkamera' }] },
-      { type: 'select', key: 'mirrorMode', label: 'Spiegelung', options: [
-        { value: 'auto', label: 'auto (Front gespiegelt, Rück nicht)' },
-        { value: 'on', label: 'immer spiegeln' },
-        { value: 'off', label: 'nie spiegeln' }],
-        desc: 'Spiegelung gilt identisch für Aufnahme UND Vorschau – die untere Hälfte bleibt exakt das, was das Modell sieht.' },
-      { type: 'select', key: 'previewMode', label: 'Vorschau unten', options: [{ value: 'exact', label: 'exakte Modell-Frames (Standard)' }, { value: 'fluid', label: 'flüssiges Kamerabild + Frame-Marker' }] },
-      { type: 'switch', key: 'pixelExact', label: 'Pixelhart skalieren', desc: 'Deaktiviert die Glättung der Vorschau, damit du 1:1 siehst, was im JPEG steht.' },
+      { type: 'select', key: 'ratio', label: 'Ausschnitt', options: [{ value: '1:1', label: 'Quadrat (wie das VLM croppt)' }, { value: '4:3', label: '4:3' }, { value: '16:9', label: '16:9' }] },
+      { type: 'range', key: 'intervalMs', label: 'Frame-Intervall', attrs: { min: 300, max: 4000, step: 100 }, fmt: v => v + ' ms' },
+      { type: 'range', key: 'quality', label: 'JPEG-Qualität (Anzeige)', attrs: { min: 0.4, max: 0.95, step: 0.05 }, fmt: v => (v * 100).toFixed(0) + '%' },
+      { type: 'select', key: 'previewMode', label: 'Vorschau', options: [{ value: 'exact', label: 'exakt gesendete Frames' }, { value: 'fluid', label: 'flüssig + Frame-Marker' }] },
+      { type: 'switch', key: 'pixelExact', label: 'Pixelhart skalieren' },
+      { type: 'select', key: 'cameraFacing', label: 'Standard-Kamera', options: [{ value: 'environment', label: 'Rückkamera (Standard)' }, { value: 'user', label: 'Frontkamera' }] },
+      { type: 'select', key: 'mirrorMode', label: 'Spiegelung', options: [{ value: 'auto', label: 'auto (Front ja, Rück nein)' }, { value: 'on', label: 'immer' }, { value: 'off', label: 'nie' }] },
 
-      { group: 'Engine' },
-      { type: 'select', key: 'engineMode', label: 'Modus', options: [
-        { value: 'auto', label: 'auto (Server → On-Device → Demo)' },
-        { value: 'server', label: 'nur Server (FastVLM lokal/LAN)' },
-        { value: 'ondevice', label: 'nur On-Device-VLM (WebGPU)' },
-        { value: 'demo', label: 'nur Demo (Regeln, 0 ms Netz)' }] },
-      { type: 'select', key: 'onDevicePreset', label: 'On-Device-Modellgröße', options: [
-        { value: 'compact', label: 'compact ≈ 676 MB (Handy)' },
-        { value: 'balanced', label: 'balanced ≈ 812 MB' },
-        { value: 'apple', label: 'apple-Demo-Mix ≈ 1,1 GB' },
-        { value: 'fp16', label: 'fp16 ≈ 1,5 GB' }] },
-      { type: 'button', key: 'ondevload', label: 'On-Device-VLM jetzt laden', buttonLabel: 'Laden' },
-
-      { group: 'Tempo & Latenz' },
-      { type: 'switch', key: 'turbo', label: 'Turbo (minimale Latenz)', desc: '512-px-Frames, greedige Dekodierung, max. 2 Sätze, kürzere Scene-Notes. Opfer: etwas Bild- und Antworttiefe.' },
-      { type: 'info', key: 'perf', rows: [['Ø TTFT', '–'], ['Ø TTFA', '–']] },
-      { type: 'info', key: 'ondevice', rows: [['On-Device', 'prüfe…']] },
-
-      { group: 'Dialog-Gehirn (optional)' },
-      { type: 'switch', key: 'llmEnable', label: 'Externes LLM fürs Reden', desc: 'FastVLM liefert dann nur noch, was sie sieht; ein OpenAI-kompatibles Modell (z. B. Ollama) formuliert die Antworten. Deutlich bessere Gespräche als mit dem 0,5B-VLM allein.' },
-      { type: 'text', key: 'llmBase', label: 'Base-URL', placeholder: 'http://127.0.0.1:11434/v1' },
-      { type: 'text', key: 'llmModel', label: 'Modell', placeholder: 'llama3.1:8b' },
-      { type: 'text', key: 'llmKey', label: 'API-Key', password: true, placeholder: 'leer = lokal' },
-      { group: 'Hinweis' },
-      { type: 'warn', html: 'Alles bleibt lokal: Frames, Audio und Text gehen nur an deinen eigenen Server. Die Sprachausgabe nutzt die im System installierten Stimmen.' },
+      { group: 'On-Device-VLM' },
+      { type: 'select', key: 'onDevicePreset', label: 'Modellgröße', options: [
+        { value: 'compact', label: 'compact ≈ 676 MB' }, { value: 'balanced', label: 'balanced ≈ 812 MB' },
+        { value: 'apple', label: 'apple-Mix ≈ 1,1 GB' }, { value: 'fp16', label: 'fp16 ≈ 1,5 GB' }] },
+      { type: 'switch', key: 'turbo', label: 'Turbo (minimale Latenz)', desc: '48 statt 96 Tokens, max. 2 Sätze. Gilt ab dem nächsten Anruf.' },
+      { type: 'info', key: 'vlm', rows: [['Status', '–']] },
+      { type: 'info', key: 'perf', rows: [['TTFA', '–']] },
+      { type: 'warn', html: 'Alles läuft on-device in deinem Browser: Frames, Audio und Text verlassen das Gerät nicht. Modell-Download einmalig vom Hugging-Face-CDN, danach Browser-Cache.' },
     ];
-    this._schema = schema;
-    UI.buildSettings(UI.$('settings-body'), schema, this.s, (k, v, item) => this.onSetting(k, v, item));
+    UI.buildSettings(UI.$('settings-body'), this._schema, this.s, (k, v, i) => this.onSetting(k, v, i));
     this.refreshVoiceOptions();
-    this.renderEngineInfo();
+    this.renderInfo();
   }
 
   onSetting(k, v) {
-    if (k === 'warm') { fetch('api/warm', { method: 'POST' }).then(r => r.json()).then(() => this.refreshStatus()); return; }
     this.s[k] = v;
     this.save();
     switch (k) {
@@ -924,109 +632,57 @@ class App {
       case 'pitch': this.tts.pitch = v; break;
       case 'volume': this.tts.volume = v; break;
       case 'voiceURI': this.tts.setVoiceURI(v) || this.tts.autoVoice(); break;
-      case 'lang':
-        this.tts.lang = v; this.asr.setLang(v); this.tts.autoVoice([], v);
-        this.sendObj({ t: 'cfg', lang: v.slice(0, 2) });
-        break;
-      case 'persona':
-        this.sendObj({ t: 'cfg', persona: v });
-        break;
-      case 'proactive': case 'activationMode': case 'activationThreshold': case 'activationCooldown':
-        this.sendObj({
-          t: 'cfg', proactive: this.s.proactive, activation_mode: this.s.activationMode,
-          activation_threshold: this.s.activationThreshold, activation_cooldown: this.s.activationCooldown,
-        });
-        break;
-      case 'neuralVad': this.vad.opts.neural = v; UI.toast('VAD-Wechsel gilt ab dem nächsten Anruf'); break;
+      case 'lang': this.tts.lang = v; this.asr.setLang(v); this.tts.autoVoice([], v); break;
+      case 'persona': this.persona = getPersona(v); break;
+      case 'proactive': this.act.tune({ enabled: v }); this.setChip('chip-pro', v ? 'Initiative an' : 'Initiative aus', v); break;
+      case 'activationThreshold': this.act.tune({ threshold: v }); break;
+      case 'activationCooldown': this.act.tune({ cooldown: v }); break;
       case 'vadOnset': this.vad.tune({ onset: v, offset: Math.max(0.15, v - 0.2) }); break;
       case 'vadHangover': this.vad.tune({ hangoverMs: v }); break;
-      case 'handsFree': v ? this.asr.start() : this.asr.stop(); break;
+      case 'handsFree': v ? (this.asr.supported && this.asr.start()) : this.asr.stop(); break;
       case 'subtitles': document.querySelector('.subs').style.display = v ? '' : 'none'; break;
       case 'pixelExact': UI.$('modelview').classList.toggle('nosmooth', v); break;
       case 'mirrorMode': this.vision.setMirrorMode(v); break;
-      case 'cameraFacing':
-        this.s.cameraFacing = v;
-        this.vision.facing = v;
-        this.vision.restart().then(() => { UI.$('btn-torch').hidden = !this.vision.hasTorch; });
-        break;
+      case 'cameraFacing': this.vision.facing = v; this.vision.restart().then(() => { UI.$('btn-torch').hidden = !this.vision.hasTorch; }); break;
       case 'previewMode': this.vision.setMode(v); break;
       case 'frameSize': this.vision.size = v; break;
       case 'ratio': this.vision.ratio = v; break;
       case 'quality': this.vision.quality = v; break;
       case 'intervalMs': this.vision.intervalMs = v; break;
-      case 'ondevload':
-        (async () => {
-          this.vlm = this.vlm || new OnDeviceVLM({ preset: this.s.onDevicePreset });
-          try {
-            await this.vlm.load((m, p) => { this._vlmProg = m; this.setChip('chip-vlm', `VLM ${(p * 100) | 0}%`, true); this.renderEngineInfo(); });
-            UI.toast('On-Device-VLM bereit: ' + this.vlm.device);
-          } catch (e) { UI.toast('Laden fehlgeschlagen: ' + (e.message || e)); }
-          this.renderEngineInfo();
-        })();
-        break;
-      case 'turbo':
-        this.vision.size = v ? 512 : this.s.frameSize;
-        this.vision.quality = v ? 0.7 : this.s.quality;
-        this.sendObj({ t: 'cfg', turbo: v });
-        UI.toast(v ? 'Turbo an: 512 px, greedy, max. 2 Sätze' : 'Turbo aus');
-        break;
-      case 'llmEnable': case 'llmBase': case 'llmModel': case 'llmKey':
-        UI.toast('LLM-Einstellungen gelten ab Server-Neustart (.env) – oder nutze /api/status');
-        break;
+      case 'onDevicePreset': UI.toast('Gilt ab dem nächsten Anruf'); break;
     }
   }
 
-  onVoices(list) {
-    this._voices = list;
-    this.refreshVoiceOptions();
-  }
-
+  onVoices(list) { this._voices = list; this.refreshVoiceOptions(); }
   refreshVoiceOptions() {
     if (!this._voices) return;
-    const ranked = rankVoices(this._voices, this.s.lang);
     const item = this._schema.find(x => x.key === 'voiceURI');
     if (!item) return;
     item.options = [{ value: '', label: 'automatisch (weiblich)' }].concat(
-      ranked.slice(0, 40).map(v => ({ value: v.voiceURI, label: `${v.name} · ${v.lang}${v.localService ? '' : ' · cloud'}` }))
-    );
+      rankVoices(this._voices, this.s.lang).slice(0, 40).map(v => ({ value: v.voiceURI, label: `${v.name} · ${v.lang}${v.localService ? '' : ' · cloud'}` })));
     UI.buildSettings(UI.$('settings-body'), this._schema, this.s, (k, v, i) => this.onSetting(k, v, i));
-    this.renderEngineInfo();
+    this.renderInfo();
   }
 
-  renderEngineInfo() {
-    const e = this.server?.engine || {}, l = this.server?.llm || {};
-    const avg = (a) => a.length ? Math.round(a.reduce((x, y) => x + y, 0) / a.length) : null;
-    UI.updateInfoBlock(UI.$('settings-body'), 'perf', [
-      ['Ø TTFT (1. Token)', (avg(this.perf.ttft) ?? '–') + (this.perf.ttft.length ? ' ms' : '')],
-      ['Ø TTFA (1. Stimme)', (avg(this.perf.ttfa) ?? '–') + (this.perf.ttfa.length ? ' ms' : '')],
-      ['Letzte Antwort', this.lastTurnMs ? Math.round(this.lastTurnMs) + ' ms' : '–'],
-      ['Frames gesendet', String(this.vision.frameId || 0)],
-      ['Build', this.buildInfo ? `${this.buildInfo.commit || '?'} · ${this.buildInfo.ts || ''}` : '–'],
-    ]);
-    UI.updateInfoBlock(UI.$('settings-body'), 'ondevice', [
-      ['WebGPU', this.onDevice ? (this.onDevice.webgpu ? 'ja' : 'nein') : '…'],
+  renderInfo() {
+    const v = this.vlm;
+    UI.updateInfoBlock(UI.$('settings-body'), 'vlm', [
+      ['Modell', 'FastVLM-0.5B-ONNX'],
+      ['Status', v ? (v.ready ? `bereit · ${v.device} · ${v.preset}` : v.loading ? 'lädt: ' + (this._vlmProg || '') : 'Fehler: ' + (v.error || this._vlmError || '')) : 'nicht geladen'],
+      ['Ladezeit', v && v.ready ? (v.loadMs / 1000).toFixed(1) + ' s' : '–'],
+      ['WebGPU', this.onDevice ? (this.onDevice.webgpu ? 'ja' : 'nein → WASM') : '…'],
       ['Gerät', this.onDevice ? `${this.onDevice.ua} · ${this.onDevice.cores} Kerne` : '…'],
-      ['Pfad', this.onDevice ? this.onDevice.verdict : '…'],
-      ['VLM-Status', this.vlm ? (this.vlm.ready ? `${this.vlm.device} · ${this.vlm.preset}` : this.vlm.loading ? ('lädt: ' + (this._vlmProg || '')) : 'Fehler') : 'nicht geladen'],
     ]);
-    UI.updateInfoBlock(UI.$('settings-body'), 'engine', [
-      ['Backend', e.backend || '–'],
-      ['Modell', (e.model || '–').toString().split('/').slice(-1)[0]],
-      ['Status', e.ready ? 'bereit' : e.loading ? 'lädt…' : (e.error ? 'Fehler → Mock' : 'wartet')],
-      ['Ladezeit', e.load_seconds ? e.load_seconds + ' s' : '–'],
-      ['Dialog-LLM', l.enabled ? `${l.backend}:${l.model}` : 'aus (FastVLM spricht selbst)'],
-      ['Letzte Szene', (this.lastScene || '–').slice(0, 60)],
-      ['Antwort Ø', this.lastTurnMs ? Math.round(this.lastTurnMs) + ' ms' : '–'],
-      ['Frames gesendet', String(this.vision.frameId || 0)],
-      ['VAD', this.vad.info?.detector || '–'],
+    const avg = (a) => a && a.length ? Math.round(a.reduce((x, y) => x + y, 0) / a.length) : null;
+    UI.updateInfoBlock(UI.$('settings-body'), 'perf', [
+      ['Ø TTFA (Redeende → Stimme)', avg(this.perf.ttfa) ? avg(this.perf.ttfa) + ' ms' : '–'],
+      ['Letzte Antwort', this.perf.ttft ? Math.round(this.perf.ttft) + ' ms' : '–'],
+      ['Frames erfasst', String(this.vision.frameId || 0)],
+      ['Build', this.buildInfo ? `${this.buildInfo.stamp || ''} · ${this.buildInfo.note || ''}`.slice(0, 60) : '–'],
     ]);
   }
 
-  openSettings(scrollTo) {
-    this.renderEngineInfo();
-    UI.$('settings').classList.add('on');
-    if (scrollTo === 'engine') UI.$('settings-body').scrollTop = 0;
-  }
+  openSettings() { this.renderInfo(); UI.$('settings').classList.add('on'); }
 }
 
 const app = new App();

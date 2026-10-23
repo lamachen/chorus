@@ -1,7 +1,7 @@
 {
- "ts": "2026-10-23T03:14:16Z",
- "stamp": "20261023031416",
- "note": "Service-Worker fix: versionierter Cache + Network-First fuer Code (kein stale Code mehr nach Deploys); Update-Toast",
+ "ts": "2026-10-23T03:35:08Z",
+ "stamp": "20261023033508",
+ "note": "Purge: Server/Mock/Regel-Charakter/Demo-Modus/geskriptete Antworten/Fakes komplett entfernt. Rein on-device: FastVLM-ONNX laedt sofort beim Antippen (Fortschritt im Ring-Screen), Begruessung frei generiert, ehrlicher Fehlerpfad statt Fallbacks. Silero als einzige VAD. Anzeige = exakte VLM-Pixel ohne JPEG-Roundtrip.",
  "app": "CHORUS · FastVLM Live-Vision-Sprachchat",
  "pages": "https://lamachen.github.io/chorus/web/index.html"
 }

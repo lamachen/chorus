@@ -227,7 +227,9 @@ ul{list-style:none}
 @keyframes bob{50%{transform:translateY(-6px)}}
 .overlay h2{font-size:27px;font-weight:600;margin-top:10px;letter-spacing:-.02em}
 .overlay p{color:var(--fg2);font-size:14px}
-.ring-actions{display:flex;gap:56px;margin-top:52px}
+.ringprog{width:220px;height:3px;background:rgba(255,255,255,.12);border-radius:3px;overflow:hidden;margin-top:14px}
+.ringprog i{display:block;height:100%;width:0;background:var(--green);transition:width .25s}
+.ring-actions{display:flex;gap:56px;margin-top:40px}
 .ring-actions .round{width:70px;height:70px}
 
 /* settings sheet */
