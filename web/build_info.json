@@ -1,7 +1,7 @@
 {
- "ts": "2026-10-23T21:25:34Z",
- "stamp": "20261023212534",
- "note": "Default q4f16 gemaess Doku-Tabelle; Optionsmenue mit exakten Komponentengroessen (D/E/V) aller Varianten + Einordnung memory-constrained; README-Tabelle",
+ "ts": "2026-10-23T22:15:29Z",
+ "stamp": "20261023221529",
+ "note": "Diagnose-Seite /web/diag.html: reines Messinstrument (WebGPU-Adapter-Wahrheit, GPU-Device-Lost-Watcher, Load-Zeiten, Roh-Outputs fuer Card-/Apple-/text-only-Konvention, optional echter Kamera-Frame), kopierbarer Bericht. Keine Aenderungen an der Call-App.",
  "app": "CHORUS · FastVLM Live-Vision-Sprachchat",
  "pages": "https://lamachen.github.io/chorus/web/index.html"
 }

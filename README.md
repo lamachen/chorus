@@ -166,6 +166,8 @@ web/js/vad-worklet.js AudioWorklet (16 kHz, 512-Frame)
 web/js/speech.js     System-TTS + System-ASR (+ Health-Watchdog)
 web/js/vision.js     Kamera → exakte VLM-Frames, Torch, Flip
 web/js/ui.js         Telefon-Chrome, Settings-Sheet, Ring-Tone, DTMF
+web/diag.html        reines Messinstrument (web/js/diag.js): Adapter-Wahrheit,
+                     Load-Zeiten, Roh-Outputs A/B/C/D, GPU-Device-Lost-Watcher
 web/vendor/          silero_vad.onnx + onnxruntime-web (wasm)
 tests/               browser_smoke.py · chain_test.py · ondevice_contract.mjs · shots.py
 tools/publish.sh     Pages-Publish
