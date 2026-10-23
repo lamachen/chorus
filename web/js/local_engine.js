@@ -211,7 +211,10 @@ export class LocalEngine {
     const score = Math.min(1, novelty * 2.6 + Math.min(1, lull / 12) * 0.9);
     const speak = score > 0.62 && lull > 6 && performance.now() - this.lastPro > 22000;
     this.emit({ t: 'activation', score: +score.toFixed(3), speak, mode: 'on-device', reason: speak ? 'Bild/Pause' : 'wartet' });
-    if (speak) { this.lastPro = performance.now(); this.turn('proactive', ''); }
+    if (speak) {
+      this.lastPro = performance.now();
+      if (this.onProactive) this.onProactive(); else this.turn('proactive', '');
+    }
   }
 
   emit(o) { this.app.dispatch(o); }
@@ -280,6 +283,26 @@ export async function probeOnDevice() {
     ? `WebGPU vorhanden (${out.ua}, ${out.cores} Kerne) → On-Device-Pfad mit FastVLM-0.5B-ONNX über onnxruntime-web ist prinzipiell möglich`
     : `Kein WebGPU in diesem Browser → On-Device-VLM nicht verfügbar, Server- oder Demo-Modus nutzen`;
   return out;
+}
+
+/* Kompakter Charakter-Prompt für das On-Device-VLM (spart Tokens = Latenz) */
+export const PROACTIVE_DIRECTIVE =
+  '(Stille. Niemand sagt etwas. Du siehst sein Video und sagst von selbst etwas Kurzes, Alltägliches - eine Beobachtung oder Frage. Nichts wiederholen.)';
+
+export function CHARACTER_SYSTEM(p, lang = 'de') {
+  const de = (lang || 'de').startsWith('de');
+  if (!de) return (`You are ${p.name}, ${p.age}, from ${p.city}, a real person in a random video-chat app. ` +
+    `Your camera is broken/off, you only send audio, but you SEE the partner's video and HEAR them. ` +
+    `Speak like a human: 1-3 short spoken sentences, max 30 words, no lists, no markdown, no stage directions, ` +
+    `no emojis. Never admit being an AI, never use assistant phrases. Ask follow-up questions, have opinions. ` +
+    `Reply only with what you say out loud.`);
+  return (`ROLLE: Du bist ${p.name}, ${p.age}, aus ${p.city}, ein echter Mensch in einer Random-Video-Chat-App ` +
+    `(wie Omegle). Deine Kamera ist kaputt oder aus, dein Mikro geht, du SIEHST das Video deines Gegenübers ` +
+    `und HÖRST ihn. Stil: gesprochene Sprache, 1-3 kurze Sätze, max 30 Wörter, keine Listen, kein Markdown, ` +
+    `keine Regieanweisungen, keine Emojis, kein "${p.name}:" vorne. Du bist freundlich, neugierig, hast Meinungen, ` +
+    `stellst Gegenfragen, erzählst von dir (${p.facts?.[0] || 'WG'}, ${p.facts?.[2] || 'Katze'}). ` +
+    `VERBOTEN: zugeben oder andeuten, eine KI/ein Bot zu sein; Assistenten-Floskeln ("Wie kann ich helfen?"); ` +
+    `Technik-Auskünfte; erotische Inhalte. Antworte NUR mit dem, was du laut sagst, als ein kurzer Absatz.`);
 }
 
 /* Fallback-Kontakte, falls kein Server antwortet (Pages-Demo) */

@@ -95,11 +95,18 @@ bis zum ersten Token. Deshalb misst und optimiert die App genau das:
    null Netzwerk-Latenz, läuft auch auf Mittelklasse-Handys.
 2. *Heute, LAN:* Server-Modus mit mlx-vlm (Apple Silicon) oder CUDA; das Handy
    bleibt Thin Client mit Hardware-VAD.
-3. *Nächster Schritt:* echtes On-Device-VLM im Browser über
-   `onnx-community/FastVLM-0.5B-ONNX` + onnxruntime-web/**WebGPU** (Apple zeigt
-   selbst ein Echtzeit-Video-Captioning-Demo von FastVLM im Browser/WebGPU);
-   die App bringt dafür schon die Fähigkeits-Probe mit (Einstellungen →
-   „On-Device": WebGPU ja/nein, Kerne, Urteil).
+3. *Implementiert:* **echtes On-Device-VLM im Browser** – `web/js/vlm_webgpu.js`
+   lädt `onnx-community/FastVLM-0.5B-ONNX` über **transformers.js 3.7.5**
+   (dieselbe Bibliothek wie Apples offizielles `apple/fastvlm-webgpu`-Demo) und
+   inferiert auf **WebGPU** (Fallback WASM): `AutoProcessor` + `AutoModelForImageTextToText`
+   mit dtype-Presets (`compact` ≈ 676 MB für Handys, `balanced`, `apple`, `fp16`),
+   Chat-Template mit `<image>`, greedy + `TextStreamer` → Satz-Queue → System-TTS.
+   Bildquelle ist derselbe Grab-Canvas wie im Server-Modus (exakt die angezeigten
+   Frames). Einstellungen → Engine: `auto | server | ondevice | demo`; ohne Server
+   fragt die App einmalig vor dem ~0,7-GB-Download (danach Browser-Cache).
+   Verifiziert: Processor-/Template-/Input-Vertrag per `tests/ondevice_contract.mjs`
+   (`LlavaProcessor`, `pixel_values [1,3,1024,1024]`); die Volllast-Inferenz braucht
+   echtes Geräte-GPU/RAM (Sandbox mit 1 GB RAM oomt beim ORT-CPU-Laden).
 4. *Nativ:* Apples offizielles Repo `apple-aiml-research/ml-fastvlm` enthält
    CoreML-Exporte/iOS-Beispiel – der Weg für eine native iOS-App mit
    Neural-Engine-Latenz.
@@ -262,6 +269,9 @@ werden.
 pip install playwright && playwright install chromium
 FASTVLM_BACKEND=mock python -m uvicorn server.main:app --port 8100 &
 python tests/browser_smoke.py      # fährt die UI mit Fake-Kamera/-Mikro, schreibt shots/
+
+# On-Device-Vertrag (Tokenizer/Chat-Template/Processor) ohne Gewichte prüfen:
+npm i @huggingface/transformers@3.7.5 && node tests/ondevice_contract.mjs
 ```
 
 Der Smoke-Test startet einen echten Anruf, injiziert einen Redebeitrag,

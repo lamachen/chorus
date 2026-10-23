@@ -74,6 +74,8 @@ async def main() -> int:
 
         await page.click("#fav-list li:first-child .c-main")
         await page.wait_for_timeout(1200)
+        if await page.locator("#od-no").count():
+            await page.click("#od-no")   # On-Device-Download-Dialog ablehnen
         await page.screenshot(path=f"{OUT}/4-ringing.png")
         await page.wait_for_timeout(3500)
 

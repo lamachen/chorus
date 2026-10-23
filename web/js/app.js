@@ -12,7 +12,8 @@
 import { MicVad } from './vad.js';
 import { SystemTTS, SystemASR, rankVoices } from './speech.js';
 import { Vision } from './vision.js';
-import { LocalEngine, probeOnDevice, DEFAULT_PERSONAS } from './local_engine.js';
+import { LocalEngine, probeOnDevice, DEFAULT_PERSONAS, CHARACTER_SYSTEM, PROACTIVE_DIRECTIVE } from './local_engine.js';
+import { OnDeviceVLM, onDeviceSupported, PRESET_MB, splitSentences } from './vlm_webgpu.js';
 import * as UI from './ui.js';
 
 const KEY = 'fastvlm-call-settings-v1';
@@ -23,6 +24,7 @@ const DEFAULTS = {
   // system speech
   voiceURI: '', rate: 1.0, pitch: 1.05, volume: 1,
   // hands-free audio
+  engineMode: 'auto', onDevicePreset: 'compact',
   handsFree: true, neuralVad: true, vadOnset: 0.55, vadOffset: 0.35,
   vadHangover: 620, halfDuplex: true, bargeIn: true,
   // frames handed to FastVLM
@@ -275,8 +277,10 @@ class App {
       UI.toast('Mikro nicht verfügbar: ' + e.message, 5000);
       this.setChip('chip-vad', 'VAD aus', false, true);
     }
-    this.connect();
-    setTimeout(() => { if (this.state === 'dialing') this.connectNow(); }, 7000);
+    const mode = this.s.engineMode || 'auto';
+    if (mode === 'ondevice') this.startLocal('On-Device-Modus', { vlm: true });
+    else if (mode === 'demo') this.startLocal('Demo-Modus');
+    else { this.connect(); setTimeout(() => { if (this.state === 'dialing' && !this.localMode) this.fallbackLocal('Server nicht erreichbar'); }, 7000); }
   }
 
   connect() {
@@ -297,12 +301,12 @@ class App {
     ws.onmessage = (ev) => this.dispatch(ev.data);
     ws.onerror = () => {
       this.setChip('chip-vlm', 'VLM Fehler', false, true);
-      if (!this.localMode && (this.state === 'dialing' || this.state === 'in-call')) this.startLocal('Server nicht erreichbar');
+      if (!this.localMode && (this.state === 'dialing' || this.state === 'in-call')) this.fallbackLocal('Server nicht erreichbar');
     };
     ws.onclose = () => {
       this.setChip('chip-vlm', 'VLM getrennt', false, true);
       if (this.localMode) return;
-      if (this.state === 'dialing') this.startLocal('Server nicht erreichbar');
+      if (this.state === 'dialing') this.fallbackLocal('Server nicht erreichbar');
       else if (this.state === 'in-call') { UI.toast('Verbindung zum Server beendet'); this.hangup(true); }
     };
   }
@@ -373,22 +377,124 @@ class App {
 
   /* ================= transport ================= */
   sendObj(o) {
-    if (this.localMode) { this.local && this.local.post(o); return true; }
+    if (this.localMode) {
+      if (this.vlm && (o.t === 'say' || o.t === 'probe')) {
+        this.vlmTurn(o.t === 'probe' ? 'probe' : 'user', o.text || '');
+        return true;
+      }
+      this.local && this.local.post(o);
+      return true;
+    }
     if (this.ws && this.ws.readyState === 1) { this.ws.send(JSON.stringify(o)); return true; }
     return false;
   }
 
-  startLocal(reason) {
+  startLocal(reason, opts = {}) {
     if (this.localMode) return;
     this.localMode = true;
     try { this.ws && this.ws.close(); } catch {}
     this.ws = null;
     const base = DEFAULT_PERSONAS.find(x => x.id === (this.persona?.id || 'mara')) || DEFAULT_PERSONAS[0];
     this.local = new LocalEngine(this, { ...base, ...(this.persona || {}) });
-    UI.toast(reason + ' → On-Device-Demomodus (ohne Server)');
-    this.setChip('chip-vlm', 'VLM on-device', true);
+    this.local.onProactive = () => this.vlmTurn('proactive', '');
+    this.vlmHistory = [];
+    this._si = 0;
+    UI.toast(reason + (opts.vlm ? ' → On-Device-VLM wird geladen' : ' → On-Device-Demomodus (ohne Server)'));
+    this.setChip('chip-vlm', opts.vlm ? 'VLM lädt…' : 'VLM on-device', true);
+    if (opts.vlm) this.initVlm();
     this.local.post({ t: 'hello', persona: base.id, lang: this.s.lang.slice(0, 2) });
     if (this.state === 'dialing') this.connectNow();
+  }
+
+  async initVlm() {
+    this.vlm = new OnDeviceVLM({ preset: this.s.onDevicePreset, device: this.s.onDeviceDevice || 'auto' });
+    try {
+      await this.vlm.load((msg, p) => {
+        this._vlmProg = msg;
+        this.setChip('chip-vlm', `VLM ${(p * 100) | 0}%`, true);
+        this.renderEngineInfo();
+      });
+      this.setChip('chip-vlm', `VLM on-device (${this.vlm.device})`, true);
+      UI.toast(`On-Device-VLM bereit (${this.vlm.device}, ${(this.vlm.loadMs / 1000).toFixed(0)} s)`);
+    } catch (e) {
+      this.vlm = null;
+      UI.toast('On-Device-VLM fehlgeschlagen: ' + (e.message || e) + ' → Regel-Charakter');
+      this.setChip('chip-vlm', 'VLM on-device (Regeln)', true);
+    }
+    this.renderEngineInfo();
+  }
+
+  /** Auto-Fallback: Server weg → erst fragen, ob das echte On-Device-VLM laufen soll */
+  fallbackLocal(reason) {
+    const sup = onDeviceSupported();
+    if (sup.webgpu && !this._askedVlm && this.s.engineMode === 'auto') {
+      this._askedVlm = true;
+      this.askOnDevice(reason);
+      return;
+    }
+    this.startLocal(reason);
+  }
+
+  askOnDevice(reason) {
+    const mb = PRESET_MB[this.s.onDevicePreset] || 676;
+    const g = UI.el('div', 'gate');
+    g.innerHTML = `<h2>On-Device-VLM laden?</h2>
+      <p>Kein Server erreichbar. Soll FastVLM-0.5B <b>direkt auf diesem Gerät</b> laufen
+      (WebGPU, einmalig ~${mb} MB Download, danach Cache)? Sonst läuft der Charakter
+      serverlos im Regel-Modus.</p>
+      <div style="display:flex;gap:12px">
+        <button class="round green" id="od-yes" style="width:auto;padding:0 20px;height:46px">VLM laden</button>
+        <button class="round ghost" id="od-no" style="width:auto;padding:0 20px;height:46px;border:1px solid #232a38">Nur Demo</button>
+      </div>`;
+    document.getElementById('phone').appendChild(g);
+    g.querySelector('#od-yes').onclick = () => { g.remove(); this.startLocal(reason, { vlm: true }); };
+    g.querySelector('#od-no').onclick = () => { g.remove(); this.startLocal(reason); };
+  }
+
+  /** Ein kompletter VLM-Turn on-device: streamt Tokens → Sätze → TTS */
+  async vlmTurn(reason, text) {
+    if (!this.vlm || !this.vlm.ready) return this.local && this.local.turn(reason, text);
+    if (this.vlmBusy) return;
+    this.vlmBusy = true;
+    this._si = 0;
+    this.dispatch({ t: 'status', state: 'thinking', reason });
+    const p = this.local?.p || this.persona || {};
+    const sys = CHARACTER_SYSTEM(p, this.s.lang);
+    const directive = reason === 'proactive' ? PROACTIVE_DIRECTIVE : text;
+    let sentBuf = '', all = '';
+    const t0 = performance.now();
+    try {
+      const full = await this.vlm.generate({
+        system: sys,
+        history: (this.vlmHistory || []).slice(-6),
+        userText: directive,
+        canvas: this.vision?.grab,
+        maxTokens: this.s.turbo ? 48 : 96,
+        onDelta: (t) => {
+          all += t;
+          this.dispatch({ t: 'delta', text: t });
+          sentBuf += t;
+          const r = splitSentences(sentBuf);
+          r.out.forEach((snt) => { if (snt) this.dispatch({ t: 'sentence', text: snt, i: ++this._si }); });
+          sentBuf = r.rest;
+          if (this._si >= (this.s.turbo ? 2 : 3)) this.vlm.cancel();
+        },
+      });
+      if (sentBuf.trim()) this.dispatch({ t: 'sentence', text: sentBuf.trim(), i: ++this._si });
+      const clean = (full || all).trim();
+      if (reason !== 'proactive' && text) (this.vlmHistory = this.vlmHistory || []).push(['user', text]);
+      if (clean) (this.vlmHistory = this.vlmHistory || []).push(['assistant', clean]);
+      this.dispatch({ t: 'turn_end', text: clean, reason, ms: performance.now() - t0, ttft_ms: 0, frames_seen: this.vision?.frameId || 0 });
+    } catch (e) {
+      if (!/__cancelled__/.test(String(e && e.message))) {
+        UI.toast('On-Device-VLM: ' + (e.message || e));
+        this.dispatch({ t: 'error', message: 'on-device: ' + (e.message || e), fatal: false });
+      } else {
+        this.dispatch({ t: 'turn_end', text: all.trim(), reason, ms: performance.now() - t0, ttft_ms: 0, frames_seen: 0 });
+      }
+    }
+    this.vlmBusy = false;
+    this.dispatch({ t: 'status', state: 'idle', reason: 'turn_end' });
   }
 
   dispatch(raw) {
@@ -665,6 +771,19 @@ class App {
       { type: 'select', key: 'previewMode', label: 'Vorschau unten', options: [{ value: 'exact', label: 'exakte Modell-Frames (Standard)' }, { value: 'fluid', label: 'flüssiges Kamerabild + Frame-Marker' }] },
       { type: 'switch', key: 'pixelExact', label: 'Pixelhart skalieren', desc: 'Deaktiviert die Glättung der Vorschau, damit du 1:1 siehst, was im JPEG steht.' },
 
+      { group: 'Engine' },
+      { type: 'select', key: 'engineMode', label: 'Modus', options: [
+        { value: 'auto', label: 'auto (Server → On-Device → Demo)' },
+        { value: 'server', label: 'nur Server (FastVLM lokal/LAN)' },
+        { value: 'ondevice', label: 'nur On-Device-VLM (WebGPU)' },
+        { value: 'demo', label: 'nur Demo (Regeln, 0 ms Netz)' }] },
+      { type: 'select', key: 'onDevicePreset', label: 'On-Device-Modellgröße', options: [
+        { value: 'compact', label: 'compact ≈ 676 MB (Handy)' },
+        { value: 'balanced', label: 'balanced ≈ 812 MB' },
+        { value: 'apple', label: 'apple-Demo-Mix ≈ 1,1 GB' },
+        { value: 'fp16', label: 'fp16 ≈ 1,5 GB' }] },
+      { type: 'button', key: 'ondevload', label: 'On-Device-VLM jetzt laden', buttonLabel: 'Laden' },
+
       { group: 'Tempo & Latenz' },
       { type: 'switch', key: 'turbo', label: 'Turbo (minimale Latenz)', desc: '512-px-Frames, greedige Dekodierung, max. 2 Sätze, kürzere Scene-Notes. Opfer: etwas Bild- und Antworttiefe.' },
       { type: 'info', key: 'perf', rows: [['Ø TTFT', '–'], ['Ø TTFA', '–']] },
@@ -718,6 +837,16 @@ class App {
       case 'ratio': this.vision.ratio = v; break;
       case 'quality': this.vision.quality = v; break;
       case 'intervalMs': this.vision.intervalMs = v; break;
+      case 'ondevload':
+        (async () => {
+          this.vlm = this.vlm || new OnDeviceVLM({ preset: this.s.onDevicePreset });
+          try {
+            await this.vlm.load((m, p) => { this._vlmProg = m; this.setChip('chip-vlm', `VLM ${(p * 100) | 0}%`, true); this.renderEngineInfo(); });
+            UI.toast('On-Device-VLM bereit: ' + this.vlm.device);
+          } catch (e) { UI.toast('Laden fehlgeschlagen: ' + (e.message || e)); }
+          this.renderEngineInfo();
+        })();
+        break;
       case 'turbo':
         this.vision.size = v ? 512 : this.s.frameSize;
         this.vision.quality = v ? 0.7 : this.s.quality;
@@ -761,6 +890,7 @@ class App {
       ['WebGPU', this.onDevice ? (this.onDevice.webgpu ? 'ja' : 'nein') : '…'],
       ['Gerät', this.onDevice ? `${this.onDevice.ua} · ${this.onDevice.cores} Kerne` : '…'],
       ['Pfad', this.onDevice ? this.onDevice.verdict : '…'],
+      ['VLM-Status', this.vlm ? (this.vlm.ready ? `${this.vlm.device} · ${this.vlm.preset}` : this.vlm.loading ? ('lädt: ' + (this._vlmProg || '')) : 'Fehler') : 'nicht geladen'],
     ]);
     UI.updateInfoBlock(UI.$('settings-body'), 'engine', [
       ['Backend', e.backend || '–'],
