@@ -136,10 +136,20 @@ export class OnDeviceVLM {
   }
 
   _prog(onProgress, m) {
-    if (!onProgress || !m || m.status !== 'progress') return;
-    const done = (m.loaded || 0) / 1e6, total = (m.total || 0) / 1e6;
-    onProgress(`${m.file || 'datei'} · ${done.toFixed(0)} / ${total.toFixed(0)} MB`,
-      total ? done / total : 0);
+    if (!onProgress || !m) return;
+    if (m.status === 'progress' && m.file) {
+      this._files = this._files || {};
+      this._files[m.file] = [m.loaded || 0, m.total || 0];
+    }
+    const f = this._files || {};
+    let loaded = 0, total = 0;
+    for (const k in f) { loaded += f[k][0]; total += f[k][1]; }
+    const p = total ? loaded / total : 0;
+    this._pMax = Math.max(this._pMax || 0, p);          // monoton: Balken zappelt nicht zurück
+    const cur = f[this._curFile || ''] ;
+    const name = Object.keys(f).slice(-1)[0] || '…';
+    onProgress(`${(loaded / 1e6).toFixed(0)} / ${(total / 1e6).toFixed(0)} MB · ${String(name).split('/').pop()}`,
+      this._pMax);
   }
 
   /**

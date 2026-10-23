@@ -184,6 +184,13 @@ ul{list-style:none}
 .ctl.hangup>svg{fill:#fff}
 .ctl.hangup{color:#ffb3ad}
 
+/* ---- Tastatur-Eingang (gleichwertig, nicht versteckt) ---- */
+.keyrow{flex:0 0 auto;display:flex;gap:6px;padding:6px 10px;background:#0a0d13;border-top:1px solid var(--line)}
+.keyrow[hidden]{display:none}
+.keyrow input{flex:1;background:var(--panel2);border:1px solid var(--line);color:var(--fg);
+  border-radius:12px;padding:10px 12px;font-size:14px;min-width:0}
+.keyrow button{background:var(--blue);color:#fff;border-radius:12px;padding:0 16px;font-weight:600}
+
 /* ---- Protokoll (mit Diagnose-Chips) ---- */
 .transcript{position:absolute;left:0;right:0;bottom:calc(84px + var(--safe-b));max-height:54%;overflow-y:auto;display:none;
   flex-direction:column;gap:8px;padding:10px 14px 12px;

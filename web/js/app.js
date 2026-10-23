@@ -232,6 +232,21 @@ class App {
       UI.$('btn-torch').hidden = !this.vision.hasTorch;
       UI.$('btn-torch').dataset.on = 'false';
     });
+    UI.$('btn-keys').onclick = (e) => this.toggle(e.currentTarget, (on) => {
+      UI.$('keyrow').hidden = !on;
+      if (on) UI.$('key-input').focus();
+    });
+    const sendKey = () => {
+      const v = UI.$('key-input').value.trim();
+      if (!v) return;
+      UI.$('key-input').value = '';
+      this.addMsg('you', 'Du (Tastatur)', v);
+      this.scrollTranscript();
+      this.commitAt = performance.now();
+      this.vlmTurn('user', v);
+    };
+    UI.$('key-send').onclick = sendKey;
+    UI.$('key-input').onkeydown = (e) => { if (e.key === 'Enter') sendKey(); };
     UI.$('btn-torch').onclick = () => this.vision.setTorch(!this.vision.torch).then((ok) => {
       UI.$('btn-torch').dataset.on = String(this.vision.torch);
       if (!ok) UI.toast('Kein Blitz an dieser Kamera verfügbar');
@@ -340,7 +355,12 @@ class App {
     this.setChip('chip-vlm', `VLM ${this.vlm.device} · ${this.vlm.preset}`, true);
     this.setChip('chip-pro', this.s.proactive ? 'Initiative an' : 'Initiative aus', this.s.proactive);
     if (this.s.handsFree && this.asr.supported) this.asr.start();
-    else this.setChip('chip-asr', 'ASR nicht verfügbar', false, true);
+    else {
+      this.setChip('chip-asr', this.asr.supported ? 'ASR aus' : 'ASR nicht verfügbar', false, true);
+      UI.$('keyrow').hidden = false;
+      UI.$('btn-keys').dataset.on = 'true';
+      if (!this.asr.supported) UI.toast('Keine System-Spracherkennung in diesem Browser – Tastatur-Eingang ist offen', 5000);
+    }
     this.addSys(`verbunden · FastVLM-0.5B on-device (${this.vlm.device})`);
     this.setupWaveform();
     this.renderAudio();
@@ -674,6 +694,8 @@ class App {
         { value: 'auto', label: 'auto (WebGPU, sonst WASM)' }, { value: 'webgpu', label: 'WebGPU erzwingen' }, { value: 'wasm', label: 'WASM/CPU erzwingen' }] },
       { type: 'switch', key: 'turbo', label: 'Turbo (minimale Latenz)', desc: '48 statt 96 Tokens, max. 2 Sätze. Gilt ab dem nächsten Anruf.' },
       { type: 'info', key: 'vlm', rows: [['Status', '–']] },
+      { type: 'button', key: 'systest', label: 'Systemtest: gesamte Signal-Kette messen', buttonLabel: 'Test' },
+      { type: 'info', key: 'test', rows: [['Systemtest', 'noch nicht gelaufen']] },
       { type: 'info', key: 'perf', rows: [['TTFA', '–']] },
       { type: 'warn', html: 'Alles läuft on-device in deinem Browser: Frames, Audio und Text verlassen das Gerät nicht. Modell-Download einmalig vom Hugging-Face-CDN, danach Browser-Cache.' },
     ];
@@ -708,6 +730,7 @@ class App {
       case 'quality': this.vision.quality = v; break;
       case 'intervalMs': this.vision.intervalMs = v; break;
       case 'onDevicePreset': UI.toast('Gilt ab dem nächsten Anruf'); break;
+      case 'systest': this.runSystemTest(); break;
     }
   }
 
@@ -741,6 +764,81 @@ class App {
   }
 
   openSettings() { this.renderInfo(); UI.$('settings').classList.add('on'); }
+
+  /** Systemtest: misst jede Stufe der echten Signal-Kette und zeigt sie als Liste. */
+  async runSystemTest() {
+    const R = [];
+    const add = (name, ok, detail) => { R.push([name, ok, detail]); this.renderTest(R); };
+    const wait = (ms) => new Promise(r => setTimeout(r, ms));
+    this.renderTest([['Test läuft …', 'warn', '']]);
+
+    add('Secure Context', window.isSecureContext ? 'pass' : 'fail', location.protocol + '//' + location.host);
+
+    try {
+      if (!this.vision.running) await this.vision.start();
+      await wait(800);
+      const g = this.vision.grab.getContext('2d', { willReadFrequently: true });
+      const d = g.getImageData(0, 0, 48, 48).data;
+      let mean = 0, varr = 0;
+      const lum = [];
+      for (let i = 0; i < d.length; i += 4) { const l = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]; lum.push(l); mean += l; }
+      mean /= lum.length;
+      for (const l of lum) varr += (l - mean) * (l - mean);
+      varr /= lum.length;
+      add('Kamera → Frame', varr > 15 ? 'pass' : 'warn', `Varianz ${varr | 0} (schwarz = 0)`);
+    } catch (e) { add('Kamera → Frame', 'fail', String(e.message || e).slice(0, 60)); }
+
+    try {
+      if (!this.vad.running) await this.vad.start();
+      let mx = 0;
+      for (let i = 0; i < 25; i++) { mx = Math.max(mx, this.vad.level); await wait(100); }
+      add('Mikro → Pegel', mx > 0.01 ? 'pass' : mx > 0.002 ? 'warn' : 'fail', `max ${mx.toFixed(3)} (Stille = !)`);
+      add('VAD (Silero)', this.vad.info.detector === 'silero' ? 'pass' : 'fail', this.vad.info.detector);
+    } catch (e) { add('Mikro/VAD', 'fail', String(e.message || e).slice(0, 60)); }
+
+    if (!this.asr.supported) {
+      add('System-ASR (Transkript)', 'fail', 'Browser ohne Spracherkennung → Tastatur-Eingang');
+    } else {
+      this.asr.start();
+      await wait(1800);
+      add('System-ASR (Transkript)', this.asr.wantRunning ? 'pass' : 'warn', 'sprich kurz: Gehörtes muss im Protokoll erscheinen');
+    }
+
+    const ttsRes = await new Promise((res) => {
+      const to = setTimeout(() => res('timeout'), 5000);
+      try {
+        const u = new SpeechSynthesisUtterance('Test.');
+        u.onstart = () => { clearTimeout(to); res('start'); };
+        u.onerror = (e) => { clearTimeout(to); res(e.error || 'error'); };
+        speechSynthesis.speak(u);
+      } catch (e) { clearTimeout(to); res('throw'); }
+    });
+    try { speechSynthesis.cancel(); } catch {}
+    add('System-TTS (Stimme)', ttsRes === 'start' ? 'pass' : 'fail', String(ttsRes));
+
+    if (this.vlm && this.vlm.ready) {
+      const t0 = performance.now();
+      let out = '';
+      try {
+        await this.vlm.generate({
+          system: 'Antworte mit genau einem Wort.', history: [], userText: 'Sag ein Wort.',
+          canvas: this.vision.grab, maxTokens: 6, onDelta: (t) => { out += t; },
+        });
+        add('VLM-Mini-Inferenz', out.trim() ? 'pass' : 'warn', `"${out.trim().slice(0, 24)}" · ${(performance.now() - t0) | 0} ms`);
+      } catch (e) { add('VLM-Mini-Inferenz', 'fail', String(e.message || e).slice(0, 60)); }
+    } else {
+      add('On-Device-VLM', 'fail', this._vlmError || 'nicht geladen (Dialer-Chip ansehen)');
+    }
+
+    const fails = R.filter(r => r[1] === 'fail').length;
+    UI.toast(fails ? `Systemtest: ${fails} Stufe(n) mit ✗` : 'Systemtest: alle Stufen ✓', 5000);
+    return R;
+  }
+
+  renderTest(R) {
+    const sym = { pass: '✓', warn: '!', fail: '✗' };
+    UI.updateInfoBlock(UI.$('settings-body'), 'test', R.map(([n, ok, d]) => [`${sym[ok] || '?'} ${n}`, d || ok]));
+  }
 }
 
 const app = new App();
