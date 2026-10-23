@@ -1,7 +1,7 @@
 {
- "ts": "2026-10-23T20:59:26Z",
- "stamp": "20261023205926",
- "note": "Download-Anzeige stabil (monotone Summe gegen bekannte Preset-Groesse, keine springenden Totals; Dialer-Label kurz + kleiner), Standard = kleinste Quantisierung (kleinst, 641 MB), alle 8 Groessen waehlbar, Hardware-WAHRHEIT im Telefonat: hud-gpu-Tag + Settings zeigen echten WebGPU-Adapter (requestAdapter/info) statt API-Flag, tatsaechlich genutztes Device und 1-Token-Zeit",
+ "ts": "2026-10-23T21:24:52Z",
+ "stamp": "20261023212452",
+ "note": "Default gemaess Doku-Tabelle zurueck auf q4f16 (807 MB, Empfehlung 'for most users'); Optionsmenue zeigt alle Varianten mit exakten Komponenten-Groessen (D/E/V) und Einordnung; kleinst/int8/uint8 explizit als memory-constrained markiert",
  "app": "CHORUS · FastVLM Live-Vision-Sprachchat",
  "pages": "https://lamachen.github.io/chorus/web/index.html"
 }
