@@ -39,7 +39,9 @@ für Bild, Ton oder Text. **▶ Live:** <https://lamachen.github.io/chorus/web/i
   FastVLM **hört nicht selbst** (Vision+Text): „hören" = System-ASR, „sehen" = Frames.
 * **Systemtest in der App** (Einstellungen → „Systemtest"): misst jede Stufe real
   (Secure Context, Kamera-Varianz, Mikro-Pegel, Silero, ASR, TTS-Start,
-  VLM-Mini-Inferenz in ms) und listet ✓/!/✗ mit Messwerten.
+  VLM-Mini-Inferenz in ms) und fährt zum Schluss die **Ground-Truth-Messreihe**:
+  fester Frame + fester Prompt, Rohausgabe in Zeichen + ms sichtbar —
+  Buchstabensalat wäre hier lesbar, bevor er jemals gesprochen wird.
 * **`tests/chain_test.py`**: 12 Asserts über alle internen Übergänge (aktuell 12/12).
 * **`tests/browser_smoke.py`**: ehrlicher Fehlerpfad (CDN weg → sichtbarer Fehler)
   + Layout-Invarianten (3 Zonen, Waveform-Band, keine Fake-Kamera-Box).
@@ -50,12 +52,19 @@ für Bild, Ton oder Text. **▶ Live:** <https://lamachen.github.io/chorus/web/i
    Pause → Commit. (Oder Tastatur-Zeile — gleicher Pfad.)
 2. **Commit** → „✓ gehört: …" bleibt stehen, bis ihre erste Sentence kommt;
    Du-Bubble ins Protokoll.
-3. **VLM-Turn** → System-Prompt (Charakter + Merkzettel + Kamera-Status) +
-   History (letzte 6 Runden) + **genau der Frame, der jetzt unten sichtbar ist**
-   (`<image>`) + dein Text → greedy. Kamera aus? **text-only** = reines
-   Sprachgespräch; sie tut nie so, als sähe sie etwas.
-4. **Tokens** → Gibberish-Gate (≥24 Zeichen Prüffenster; Salat ⇒ Abbruch, nichts
-   an die TTS) → Satz-Splitter (hart bei 64 Zeichen) → TTS → Waveform.
+3. **VLM-Turn** → streng nach öffentlicher Doku (ONNX-Card + Apples
+   WebGPU-Demo): **single-turn** — System-Prompt (Charakter + Merkzettel +
+   letzter Austausch wörtlich) + **ein** User-Turn mit `<image>` direkt vor
+   dem Text + **immer ein Bild**: der live angezeigte Frame, bei Kamera aus
+   das eingefrorene Restbild (Prompt-Regel: als „kein Bild" behandeln).
+   Kein Multi-Turn-Template, kein text-only-Prefill — beides ist für diesen
+   Export öffentlich nicht belegt und war nachweislich eine Fehlerquelle.
+4. **Tokens** → Gibberish-Gate (≥24 Zeichen Prüffenster; Salat ⇒ Ausgabe wird
+   verworfen, nichts an die TTS) → Satz-Splitter (hart bei 64 Zeichen) → TTS →
+   Waveform. **Nie wird ein laufendes `generate` abgebrochen** (kein
+   WebGPU-Abort mid-flight): Barge-in/Watchdog/Gate setzen nur ein
+   Discard-Flag (Stream wird verworfen, TTS schweigt), die Inferenz läuft wie
+   in Apples Demo hinter einem Lock zu Ende; neue Turns warten serialisiert.
 5. **Denkt-Watchdog**: Status zeigt „denkt nach … Xs (tippen = abbrechen)";
    ohne 1. Token in 60 s (WebGPU) / 150 s (WASM) bricht der Turn ehrlich ab.
    Nach dem Laden: 1-Token-Warmup, damit der erste Turn nicht die
@@ -96,9 +105,12 @@ Turns nehmen bevorzugt den Verlauf auf.
 
 * `onnx-community/FastVLM-0.5B-ONNX` über **transformers.js 3.7.5** (dieselbe
   Kette wie Apples `apple/fastvlm-webgpu`-Demo), WebGPU sonst WASM.
-* Presets: **Standard = Apples validierter Mix** (embed fp16 / vision q4 /
-  decoder q4 ≈ 1,1 GB), `fp16` ≈ 1,5 GB, `compact` ≈ 676 MB **experimentell**
-  (uint8-Vision kann Salat erzeugen — deshalb nicht mehr Default).
+* Presets (nur öffentlich validierte Mixe): **Standard `q4f16` komplett**
+  (Talk2FastVLM-Default, ≈ 807 MB), `apple` (embed fp16 / vision q4 / decoder
+  q4, ≈ 1,1 GB, Mix aus Apples Demo & Card), `fp16` (≈ 1,5 GB). uint8/int8
+  ersatzlos gestrichen (nur als Notlagen-Stufe dokumentiert, Salat-Risiko).
+* Generate-Parameter wie Doku: `do_sample:false`, `repetition_penalty:1.2`
+  (Apples Demo-Wert), `TextStreamer(skip_prompt:true)`.
 * Load startet **beim Seitenstart** (Dialer-Chip: `VLM lädt x %` → `bereit` →
   `Fehler`), kein Button/Dialog; Preflight vorab, Byte-Watchdog, Kill-Switch
   gegen Retry-Stürme; Service-Worker fasst keine Cross-Origin-Fetches an.

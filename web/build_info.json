@@ -1,7 +1,7 @@
 {
- "ts": "2026-10-23T15:41:10Z",
- "stamp": "20261023154110",
- "note": "Logik- und Konzept-Fixes: Apple-validierter dtype-Mix als Default gegen Buchstabensalat, Gibberish-Gate vor TTS, TTS-Hard-Splits bei 64 Zeichen, gehoertes Transkript bleibt sichtbar bis ihre erste Sentence, Kamera aus = reines Sprachgespräch (text-only Turns + Pausen-Initiative), Merkzettel-Gedächtnis (Round-Decay on-device, alle 4 Runden), Think-Watchdog mit Sekundenanzeige + Abbruch per Tipp, 1-Token-Warmup gegen Shader-Kompilierung im ersten Turn, Waveform als exakt mittiges 96px-Trennband, Video-Kommentar nur bei Aenderung/Frage/Passung. chain_test 12/12, smoke gruen. README restauriert nach Workspace-Schaden, Repo an Remote-History angedockt.",
+ "ts": "2026-10-23T19:58:34Z",
+ "stamp": "20261023195834",
+ "note": "Dokumentkonforme Inferenz: single-turn + immer ein Bild (Freeze-Frame bei Kamera aus), q4f16-Default (public validiert), uint8 raus, kein Cancel mid-generate (Discard-Flag + serialisierender Mutex wie Apples inferenceLock), rep-penalty 1.2, Ground-Truth-Messreihe im Systemtest. chain 13/13",
  "app": "CHORUS · FastVLM Live-Vision-Sprachchat",
  "pages": "https://lamachen.github.io/chorus/web/index.html"
 }

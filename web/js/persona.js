@@ -66,7 +66,8 @@ export const getPersona = (id) => PERSONAS.find((p) => p.id === id) || PERSONAS[
 
 export function characterSystem(p, lang = 'de', opts = {}) {
   const extra = [];
-  if (opts.cameraOn === false) extra.push('SEIN VIDEO IST JETZT AUS: Du siehst nichts. Führe ein völlig normales Sprachgespräch wie am Telefon. Tue NIEMALS so, als würdest du etwas sehen, und frag nicht nach seinem Bild.');
+  if (opts.cameraOn === false) extra.push('SEIN VIDEO IST JETZT AUS: Du bekommst technisch ein eingefrorenes Restbild geliefert - behandle es als KEIN Bild: beschreibe es nicht, erwähne es nicht, ziehe keine Schlüsse daraus. Führe ein völlig normales Sprachgespräch wie am Telefon und tue nie so, als würdest du ihn gerade sehen.');
+  if (opts.lastExchange) extra.push('LETZTER AUSTAUSCH (unmittelbar vor diesem Zug, wörtlich): ' + opts.lastExchange);
   if (opts.memo) extra.push('MERKZETTEL FRÜHERER GESPRÄCHSTEILE (nutze ihn, um Bezug zu nehmen, Widersprüche zu vermeiden, nachzufragen): ' + opts.memo);
   const extraDe = extra.length ? '\nZUSATZ:\n' + extra.map(e => '- ' + e).join('\n') : '';
   const extraEn = extra.length ? '\nEXTRA:\n' + extra.map(e => '- ' + e).join('\n') : '';

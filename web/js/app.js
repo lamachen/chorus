@@ -28,7 +28,7 @@ const DEFAULTS = {
   frameSize: 768, ratio: '1:1', intervalMs: 1100, quality: 0.8,
   previewMode: 'exact', pixelExact: false, cameraFacing: 'environment', mirrorMode: 'auto',
   proactive: true, activationThreshold: 0.62, activationCooldown: 22, subtitles: true,
-  onDevicePreset: 'apple', onDeviceDevice: 'auto', turbo: false,
+  onDevicePreset: 'q4f16', onDeviceDevice: 'auto', turbo: false,
 };
 
 const load = () => { try { return { ...DEFAULTS, ...(JSON.parse(localStorage.getItem(KEY)) || {}) }; } catch { return { ...DEFAULTS }; } };
@@ -447,12 +447,13 @@ class App {
     let sentBuf = '', all = '';
     const t0 = performance.now();
     try {
+      const last = this.vlmHistory.slice(-2).map(([r, t]) => (r === 'user' ? 'ER: ' : 'SIE: ') + t).join(' | ');
       const full = await this.vlm.generate({
-        system: characterSystem(this.persona, this.s.lang, { cameraOn: this.cameraOn, memo: this.memo.summary }),
-        history: this.vlmHistory.slice(-6),
+        system: characterSystem(this.persona, this.s.lang, { cameraOn: this.cameraOn, memo: this.memo.summary, lastExchange: last }),
+        history: [],                      // Doku-Konvention: single-turn; Kontext via Merkzettel + letzter Austausch
         userText,
-        // Kamera aus => reines Sprachgespräch (text-only); sonst exakt der angezeigte Frame
-        canvas: this.cameraOn ? this.vision.grab : null,
+        // IMMER ein Bild (Doku: jeder Aufruf mit Bild): Live-Frame, bei Kamera aus das eingefrorene Restbild
+        canvas: this.vision.frameId > 0 ? this.vision.grab : this.neutralCanvas(),
         maxTokens: this.s.turbo ? 48 : 96,
         onDelta: (tk) => {
           if (!this._gotFirst) {
@@ -513,6 +514,35 @@ class App {
     this.thinkStart = 0;
     this.lastExchange = performance.now();
     this.dispatch({ t: 'status', state: 'idle' });
+  }
+
+  neutralCanvas() {
+    if (!this._neutral) {
+      const c = document.createElement('canvas');
+      c.width = 64; c.height = 64;
+      const x = c.getContext('2d');
+      x.fillStyle = '#101014'; x.fillRect(0, 0, 64, 64);
+      this._neutral = c;
+    }
+    return this._neutral;
+  }
+
+  /** Ground-Truth-Messreihe: fester Frame + fester Prompt, Rohausgabe sichtbar. */
+  async messreihe() {
+    const c = document.createElement('canvas');
+    c.width = 256; c.height = 256;
+    const x = c.getContext('2d');
+    x.fillStyle = '#204080'; x.fillRect(0, 0, 256, 256);
+    x.fillStyle = '#e08020'; x.fillRect(40, 60, 120, 90);
+    x.fillStyle = '#ffffff'; x.beginPath(); x.arc(190, 190, 40, 0, 7); x.fill();
+    const t0 = performance.now();
+    let out = '';
+    await this.vlm.generate({
+      system: 'Antworte in genau einem kurzen Satz.',
+      history: [], userText: 'Beschreibe in einem Satz, was in diesem Bild zu sehen ist.',
+      canvas: c, maxTokens: 40, onDelta: (t) => { out += t; },
+    });
+    return { out: out.trim(), ms: Math.round(performance.now() - t0), chars: out.trim().length };
   }
 
   /** StreamBridge-Round-Decay on-device: alle 4 Runden backt das VLM nebenher
@@ -783,9 +813,9 @@ class App {
 
       { group: 'On-Device-VLM' },
       { type: 'select', key: 'onDevicePreset', label: 'Modell-Mix', options: [
-        { value: 'apple', label: 'Standard (von Apple validiert) ≈ 1,1 GB' },
-        { value: 'fp16', label: 'fp16 ≈ 1,5 GB (max. Qualität)' },
-        { value: 'compact', label: 'compact ≈ 676 MB (EXPERIMENTELL: kann Buchstabensalat erzeugen)' }] },
+        { value: 'q4f16', label: 'Standard q4f16 (öffentlich validiert, ≈ 807 MB)' },
+        { value: 'apple', label: 'apple-Mix (fp16/q4/q4, ≈ 1,1 GB)' },
+        { value: 'fp16', label: 'fp16 (≈ 1,5 GB, max. Qualität)' }] },
       { type: 'select', key: 'onDeviceDevice', label: 'Inferenz-Gerät', options: [
         { value: 'auto', label: 'auto (WebGPU, sonst WASM)' }, { value: 'webgpu', label: 'WebGPU erzwingen' }, { value: 'wasm', label: 'WASM/CPU erzwingen' }] },
       { type: 'switch', key: 'turbo', label: 'Turbo (minimale Latenz)', desc: '48 statt 96 Tokens, max. 2 Sätze. Gilt ab dem nächsten Anruf.' },
@@ -924,6 +954,14 @@ class App {
       } catch (e) { add('VLM-Mini-Inferenz', 'fail', String(e.message || e).slice(0, 60)); }
     } else {
       add('On-Device-VLM', 'fail', this._vlmError || 'nicht geladen (Dialer-Chip ansehen)');
+    }
+
+    if (this.vlm && this.vlm.ready) {
+      try {
+        const m = await this.messreihe();
+        add('Messreihe (Ground-Truth)', looksGibberish(m.out) ? 'fail' : 'pass',
+          `${m.chars} Z. in ${m.ms} ms → „${m.out.slice(0, 60)}“`);
+      } catch (e) { add('Messreihe (Ground-Truth)', 'fail', String(e.message || e).slice(0, 60)); }
     }
 
     const fails = R.filter(r => r[1] === 'fail').length;

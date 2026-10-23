@@ -65,6 +65,7 @@ async def main() -> int:
           a.vlm = {
             ready: true, loading: false, device: 'stub', preset: 'compact',
             cancel() { window.__rec.cancels++; },
+            discardTurn() { window.__rec.cancels++; },
             warmup: async () => {},
             generate: async (o) => {
               window.__rec.calls.push({ user: o.userText, hasCanvas: !!o.canvas, sys: (o.system||'').slice(0,40), hist: (o.history||[]).length });
@@ -152,6 +153,10 @@ async def main() -> int:
         g = await page.evaluate("""() => ({ q: window.__ttsQ.length, gib: window.__app._gibHit === true,
           chip: document.getElementById('chip-vlm').textContent })""")
         check("Kette 8: Gibberish-Gate -> TTS bekommt nichts", g['q'] == 0 and g['gib'], str(g))
+
+        # Stufe 9: Single-Turn-Konvention (keine Roh-History im Template)
+        c9 = await page.evaluate("() => window.__rec.calls[window.__rec.calls.length-1]")
+        check("Kette 9: Single-Turn laut Doku (history leer)", c9['hist'] == 0, str(c9['hist']))
 
         await browser.close()
     httpd.shutdown()

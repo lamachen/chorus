@@ -25,13 +25,18 @@ export const MODEL_ID = 'onnx-community/FastVLM-0.5B-ONNX';
 
 /* NUR von Apple validierte Mischungen als Standard: uint8-Vision/Embeddings
  * erzeugen nachweislich Buchstabensalat - deshalb nicht mehr Default. */
+/* Nur öffentlich validierte Mixe:
+ *   q4f16  = Talk2FastVLM-Default (deren Speed/Qualitäts-Empfehlung, ~807 MB)
+ *   apple  = Mix aus Apples WebGPU-Demo & ONNX-Card (~1095 MB)
+ *   fp16   = Qualitätsempfehlung (~1516 MB)
+ * uint8/int8: ersatzlos gestrichen (nur als Notlagen-Stufe dokumentiert, Salat-Risiko). */
 export const DTYPE_PRESETS = {
+  q4f16: { embed_tokens: 'q4f16', vision_encoder: 'q4f16', decoder_model_merged: 'q4f16' },
   apple: { embed_tokens: 'fp16', vision_encoder: 'q4', decoder_model_merged: 'q4' },
   fp16: { embed_tokens: 'fp16', vision_encoder: 'fp16', decoder_model_merged: 'fp16' },
-  compact: { embed_tokens: 'uint8', vision_encoder: 'uint8', decoder_model_merged: 'q4' },
 };
 
-export const PRESET_MB = { apple: 1095, fp16: 1516, compact: 676 };
+export const PRESET_MB = { q4f16: 807, apple: 1095, fp16: 1516 };
 
 /** Buchstabensalat-Erkennung: verhindert, dass Müll in die System-TTS geht. */
 export function looksGibberish(text) {
@@ -173,17 +178,21 @@ export class OnDeviceVLM {
    *                   maxTokens, temperature? (nur do_sample), onDelta(text)
    * @returns {string} kompletter Antworttext
    */
+  /** Dokumentkonform: single-turn (System + ein User-Turn mit <image>),
+   *  kein Abbruch mitten in generate (Apple-Demo: skippen statt canceln),
+   *  serieller Zugriff über Mutex statt busy-throw. */
   async generate({ system, history = [], userText, canvas, maxTokens = 96, onDelta }) {
     if (!this.ready) await this.load();
-    if (this.busy) throw new Error('on-device VLM beschäftigt');
+    while (this._mutex) await this._mutex;
+    let release;
+    this._mutex = new Promise((r) => { release = r; });
     this.busy = true;
-    this.cancelled = false;
+    this.discard = false;
     const T = this.T;
     try {
       const messages = [];
       if (system) messages.push({ role: 'system', content: system });
-      for (const [role, text] of history.slice(-6)) messages.push({ role, content: text });
-      messages.push({ role: 'user', content: `<image>\n${userText}` });
+      messages.push({ role: 'user', content: `<image>${userText}` });
 
       const prompt = this.processor.apply_chat_template(messages, { add_generation_prompt: true });
 
@@ -199,28 +208,31 @@ export class OnDeviceVLM {
       const self = this;
       const streamer = new T.TextStreamer(this.processor.tokenizer, {
         skip_prompt: true,
-        skip_special_tokens: true,
+        skip_special_tokens: true,      // wie Apples WebGPU-Demo
         callback_function: (t) => {
-          if (self.cancelled) throw new Error('__cancelled__');
           streamed += t;
-          onDelta && onDelta(t);
+          if (!self.discard) onDelta && onDelta(t);   // discard = verwerfen, NICHT abbrechen
         },
       });
 
       await this.model_.generate({
         ...inputs,
         max_new_tokens: maxTokens,
-        do_sample: false,               // greedy = deterministisch + schnellster TTFT
-        repetition_penalty: 1.15,
+        do_sample: false,               // greedy, wie Card & Apple-Demo
+        repetition_penalty: 1.2,        // exakt Apples Demo-Wert
         streamer,
       });
       return streamed.trim();
     } finally {
       this.busy = false;
+      release();
+      this._mutex = null;
     }
   }
 
-  cancel() { this.cancelled = true; }
+  /** Ausgabe verwerfen (TTS schweigt), Inferenz aber fertig laufen lassen. */
+  discardTurn() { this.discard = true; }
+  cancel() { this.discard = true; }
 
   /** 1-Token-Warmup: kompiliert Kernel/Shader, damit der erste echte Turn
    *  nicht minutenlang "denkt". Laeuft im Hintergrund, Fehler werden ignoriert. */
