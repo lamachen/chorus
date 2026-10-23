@@ -16,7 +16,7 @@ import * as UI from './ui.js';
 import { MicVad } from './vad.js';
 import { SystemTTS, SystemASR, rankVoices } from './speech.js';
 import { Vision } from './vision.js';
-import { OnDeviceVLM, onDeviceSupported, PRESET_MB, splitSentences } from './vlm_webgpu.js';
+import { OnDeviceVLM, onDeviceSupported, PRESET_MB, splitSentences, looksGibberish } from './vlm_webgpu.js';
 import { PERSONAS, getPersona, characterSystem, directives } from './persona.js';
 import { Activation } from './activation.js';
 
@@ -28,7 +28,7 @@ const DEFAULTS = {
   frameSize: 768, ratio: '1:1', intervalMs: 1100, quality: 0.8,
   previewMode: 'exact', pixelExact: false, cameraFacing: 'environment', mirrorMode: 'auto',
   proactive: true, activationThreshold: 0.62, activationCooldown: 22, subtitles: true,
-  onDevicePreset: 'compact', onDeviceDevice: 'auto', turbo: false,
+  onDevicePreset: 'apple', onDeviceDevice: 'auto', turbo: false,
 };
 
 const load = () => { try { return { ...DEFAULTS, ...(JSON.parse(localStorage.getItem(KEY)) || {}) }; } catch { return { ...DEFAULTS }; } };
@@ -48,6 +48,11 @@ class App {
     this.vlmHistory = [];
     this.vlmBusy = false;
     this.greeted = false;
+    this.cameraOn = true;
+    this.memo = { summary: '', rounds: 0 };
+    this.memoBusy = false;
+    this.thinkStart = 0;
+    this._gotFirst = false;
     this.perf = { ttfa: [] };
     this.commitAt = 0;
     this.lastExchange = 0;
@@ -132,6 +137,7 @@ class App {
     }).then(() => {
       label(`VLM bereit · ${this.vlm.device}`, 'ok');
       this.setChip('chip-vlm', `VLM ${this.vlm.device} · ${this.vlm.preset}`, true);
+      this.vlm.warmup && this.vlm.warmup();
       this.renderInfo();
     }).catch((e) => {
       this._vlmError = String(e && e.message || e);
@@ -157,8 +163,9 @@ class App {
     c.width = Math.max(1, Math.round(c.clientWidth * dpr));
     c.height = Math.max(1, Math.round(c.clientHeight * dpr));
     this._wf = c;
-    this.micHist = new Array(64).fill(0);
-    this.herHist = new Array(64).fill(0);
+    this._wfBars = Math.max(28, Math.floor(c.clientWidth / 6));
+    this.micHist = new Array(this._wfBars).fill(0);
+    this.herHist = new Array(this._wfBars).fill(0);
   }
 
   /** gespiegelte Echtzeit-Waveform: oben = ihre TTS-Hüllkurve, unten = dein Mikro-RMS */
@@ -168,8 +175,8 @@ class App {
     const ctx = c.getContext('2d');
     const w = c.width, h = c.height, mid = h / 2;
     ctx.clearRect(0, 0, w, h);
-    ctx.fillStyle = 'rgba(255,255,255,.16)';
-    ctx.fillRect(0, mid - 1, w, 1.5);
+    ctx.fillStyle = 'rgba(255,255,255,.18)';
+    ctx.fillRect(0, mid - 0.75, w, 1.5);
     const n = this.micHist.length, bw = w / n;
     const hue = this.persona?.hue ?? 326;
     for (let i = 0; i < n; i++) {
@@ -177,10 +184,11 @@ class App {
       const hv = Math.min(1, this.herHist[i] || 0);
       const mh = Math.pow(mv, 0.7) * (mid - 6);
       const hh = hv * (mid - 6);
-      ctx.fillStyle = mv < 0.004 ? 'rgba(59,157,255,.28)' : 'rgba(59,157,255,.95)';
-      ctx.fillRect(i * bw + 1, mid + 1, bw - 2, Math.max(1, mh));
-      ctx.fillStyle = `hsl(${hue} 85% 66% / ${0.35 + hv * 0.65})`;
-      ctx.fillRect(i * bw + 1, mid - 1 - Math.max(1, hh), bw - 2, Math.max(1, hh));
+      const rr = (x, y, ww, h2) => { ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x, y, ww, h2, 2); else ctx.rect(x, y, ww, h2); ctx.fill(); };
+      ctx.fillStyle = mv < 0.004 ? 'rgba(59,157,255,.25)' : `rgba(59,157,255,${0.45 + mv * 0.55})`;
+      rr(i * bw + 1, mid + 2, bw - 2, Math.max(1.5, mh));
+      ctx.fillStyle = `hsl(${hue} 85% 66% / ${0.3 + hv * 0.7})`;
+      rr(i * bw + 1, mid - 2 - Math.max(1.5, hh), bw - 2, Math.max(1.5, hh));
     }
   }
 
@@ -210,10 +218,20 @@ class App {
       UI.toast(on ? 'Mikro an' : 'Mikro stumm');
     });
     UI.$('btn-cam').onclick = (e) => this.toggle(e.currentTarget, (on) => {
+      this.cameraOn = on;
       UI.$('mine').classList.toggle('off', !on);
       this.vision.setPaused(!on);
-      UI.toast(on ? 'Kamera an – sie sieht dich wieder' : 'Kamera aus – sie sieht nichts mehr');
+      UI.toast(on ? 'Kamera an – sie sieht dich wieder' : 'Kamera aus – reines Sprachgespräch läuft weiter');
     });
+    UI.$('call-state').onclick = () => {
+      if (!this.thinkStart) return;
+      this.vlm && this.vlm.cancel();
+      this.tts.cancel();
+      this.vlmBusy = false;
+      this.thinkStart = 0;
+      this.dispatch({ t: 'status', state: 'idle' });
+      UI.toast('Turn abgebrochen');
+    };
     UI.$('btn-subs').onclick = (e) => this.toggle(e.currentTarget, (on) => {
       this.s.subtitles = on; this.save();
       this.setSubsVisible(on);
@@ -354,6 +372,7 @@ class App {
     this._clockTimer = setInterval(() => { UI.$('call-timer').textContent = UI.fmtDur((Date.now() - this.t0) / 1000); }, 500);
     this.setChip('chip-vlm', `VLM ${this.vlm.device} · ${this.vlm.preset}`, true);
     this.setChip('chip-pro', this.s.proactive ? 'Initiative an' : 'Initiative aus', this.s.proactive);
+    this.vlm.warmup && this.vlm.warmup();
     if (this.s.handsFree && this.asr.supported) this.asr.start();
     else {
       this.setChip('chip-asr', this.asr.supported ? 'ASR aus' : 'ASR nicht verfügbar', false, true);
@@ -418,6 +437,9 @@ class App {
     if (!this.vlm || !this.vlm.ready || this.vlmBusy) return;
     this.vlmBusy = true;
     this._si = 0;
+    this._gibAcc = ''; this._gibDone = false; this._gibHit = false;
+    this.thinkStart = performance.now();
+    this._gotFirst = false;
     this.herBubble = null; this.herPending = '';
     this.dispatch({ t: 'status', state: 'thinking', reason });
     const dir = directives(this.s.lang);
@@ -426,13 +448,33 @@ class App {
     const t0 = performance.now();
     try {
       const full = await this.vlm.generate({
-        system: characterSystem(this.persona, this.s.lang),
+        system: characterSystem(this.persona, this.s.lang, { cameraOn: this.cameraOn, memo: this.memo.summary }),
         history: this.vlmHistory.slice(-6),
         userText,
-        canvas: this.vision.grab,                 // exakt der angezeigte Frame
+        // Kamera aus => reines Sprachgespräch (text-only); sonst exakt der angezeigte Frame
+        canvas: this.cameraOn ? this.vision.grab : null,
         maxTokens: this.s.turbo ? 48 : 96,
         onDelta: (tk) => {
+          if (!this._gotFirst) {
+            this._gotFirst = true;
+            const ttft = performance.now() - this.thinkStart;
+            this.perf.ttft = ttft;
+            this.setChip('chip-vlm', `1. Token ${Math.round(ttft / 1000)}s · ${this.vlm.device}`, true);
+          }
           all += tk;
+          this._gibAcc += tk;
+          if (!this._gibDone && this._gibAcc.length >= 24) {
+            this._gibDone = true;
+            if (looksGibberish(this._gibAcc)) {
+              this._gibHit = true;
+              this.vlm.cancel();
+              this.tts.cancel();
+              this.setChip('chip-vlm', 'Ausgabe = Buchstabensalat', false, true);
+              UI.toast('On-Device-VLM hat Buchstabensalat erzeugt – Turn abgebrochen, nichts gesprochen. Preset „Standard“ oder „fp16“ wählen.', 7000);
+              return;
+            }
+          }
+          if (this._gibHit) return;
           this.dispatch({ t: 'delta', text: tk });
           sentBuf += tk;
           const r = splitSentences(sentBuf);
@@ -441,11 +483,22 @@ class App {
           if (this._si >= (this.s.turbo ? 2 : 3)) this.vlm.cancel();
         },
       });
+      if (this._gibHit) { this.vlmBusy = false; this.thinkStart = 0; this.dispatch({ t: 'status', state: 'idle' }); return; }
       if (sentBuf.trim()) this.dispatch({ t: 'sentence', text: sentBuf.trim(), i: ++this._si });
       const clean = (full || all).trim();
+      if (looksGibberish(clean)) {
+        this.tts.cancel();
+        this.setChip('chip-vlm', 'Ausgabe = Buchstabensalat', false, true);
+        UI.toast('VLM-Ausgabe unbrauchbar – nicht gesprochen. Preset wechseln.', 6000);
+        this.vlmBusy = false; this.thinkStart = 0;
+        this.dispatch({ t: 'status', state: 'idle' });
+        return;
+      }
       if (reason === 'user' && text) this.vlmHistory.push(['user', text]);
       else if (reason !== 'user') this.vlmHistory.push(['user', '(Stille)']);
       if (clean) this.vlmHistory.push(['assistant', clean]);
+      this.memo.rounds++;
+      this.maybeCompress();
       this.dispatch({ t: 'turn_end', text: clean, reason, ms: performance.now() - t0 });
     } catch (e) {
       const msg = String(e && e.message || e);
@@ -457,8 +510,26 @@ class App {
       }
     }
     this.vlmBusy = false;
+    this.thinkStart = 0;
     this.lastExchange = performance.now();
     this.dispatch({ t: 'status', state: 'idle' });
+  }
+
+  /** StreamBridge-Round-Decay on-device: alle 4 Runden backt das VLM nebenher
+   *  aus altem Merkzettel + letzten Runden einen neuen Merkzettel. */
+  maybeCompress() {
+    if (this.memo.rounds < 4 || this.memoBusy || !this.vlm?.ready || this.vlmBusy) return;
+    this.memo.rounds = 0;
+    const rounds = this.vlmHistory.slice(-8).map(([r, t]) => (r === 'user' ? 'ER: ' : 'SIE: ') + t).join('\n');
+    this.memoBusy = true;
+    this.vlm.generate({
+      system: 'Fasse diesen Gesprächsausschnitt in maximal zwei kurzen Sätzen zusammen. Nur Fakten, die man später noch braucht (Namen, Orte, Vorlieben, Absprachen). Keine Anrede.',
+      history: [], userText: (this.memo.summary ? 'ALTER MERKZETTEL: ' + this.memo.summary + '\n' : '') + rounds,
+      canvas: null, maxTokens: 48,
+    }).then((t) => {
+      const sum = (t || '').trim().replace(/\s+/g, ' ');
+      if (sum && !looksGibberish(sum)) this.memo.summary = sum.slice(0, 220);
+    }).catch(() => {}).finally(() => { this.memoBusy = false; this.renderInfo(); });
   }
 
   dispatch(m) {
@@ -475,6 +546,7 @@ class App {
         this.scrollTranscript();
         break;
       case 'sentence':
+        if (!this._subCleared) { this._subCleared = true; this.subYou(''); }
         this.tts.enqueue(m.text);
         this.subHer(m.text);
         break;
@@ -506,7 +578,8 @@ class App {
     clearTimeout(this.commitTimer);
     const text = this.pendingText.trim();
     this.pendingText = '';
-    this.subYou('');
+    this.subYou('✓ gehört: ' + text);
+    this._subCleared = false;
     if (!text || this.state !== 'in-call') return;
     this.addMsg('you', 'Du', text);
     this.scrollTranscript();
@@ -549,10 +622,10 @@ class App {
       const draw = this._wfTick % 2 === 0;
 
       const lvl = this.vad?.running ? this.vad.level : 0;
-      this.micHist = (this.micHist || []).concat(lvl).slice(-64);
+      this.micHist = (this.micHist || []).concat(lvl).slice(-(this._wfBars || 48));
       if (this.tts.speaking && !this._boundCount) this.herEnv = Math.max(this.herEnv || 0, 0.3);
       this.herEnv = (this.herEnv || 0) * 0.90;
-      this.herHist = (this.herHist || []).concat(this.herEnv || 0).slice(-64);
+      this.herHist = (this.herHist || []).concat(this.herEnv || 0).slice(-(this._wfBars || 48));
       if (draw) this.drawWave();
 
       // Barge-in-Kanal 2: echter Pegel-Spike ueber dem adaptiven Noisefloor
@@ -564,6 +637,28 @@ class App {
 
       if (this.s.handsFree && this.asr.supported && this.asr.healthTick()) {
         this.setChip('chip-asr', 'ASR neu gestartet', false, true);
+      }
+
+      // Think-Watchdog: sichtbare Sekunden + ehrlicher Abbruch statt "denkt unendlich"
+      if (this.thinkStart && !this._gotFirst) {
+        const el = (now - this.thinkStart) / 1000;
+        const sec = Math.round(el);
+        if (sec !== this._thinkSec) {
+          this._thinkSec = sec;
+          this.setChip('chip-vlm', `denkt … ${sec}s (${this.vlm?.device || '?'})`, true);
+          UI.$('call-state').textContent = `denkt nach … ${sec}s (tippen = abbrechen)`;
+        }
+        const lim = (this.vlm?.device === 'wasm' ? 150 : 60) * (this.s.turbo ? 0.6 : 1);
+        if (el > lim) {
+          this.thinkStart = 0;
+          this.vlm && this.vlm.cancel();
+          this.vlmBusy = false;
+          this.dispatch({ t: 'status', state: 'idle' });
+          this.setChip('chip-vlm', 'Turn: kein 1. Token', false, true);
+          UI.toast(`Kein erstes Token in ${Math.round(lim)}s (${this.vlm?.device}). Turbo an oder Preset fp16 versuchen.`, 7000);
+        }
+      } else if (this.thinkStart && this._gotFirst) {
+        UI.$('call-state').textContent = 'spricht…';
       }
     };
     loop();
@@ -687,9 +782,10 @@ class App {
       { type: 'select', key: 'mirrorMode', label: 'Spiegelung', options: [{ value: 'auto', label: 'auto (Front ja, Rück nein)' }, { value: 'on', label: 'immer' }, { value: 'off', label: 'nie' }] },
 
       { group: 'On-Device-VLM' },
-      { type: 'select', key: 'onDevicePreset', label: 'Modellgröße', options: [
-        { value: 'compact', label: 'compact ≈ 676 MB' }, { value: 'balanced', label: 'balanced ≈ 812 MB' },
-        { value: 'apple', label: 'apple-Mix ≈ 1,1 GB' }, { value: 'fp16', label: 'fp16 ≈ 1,5 GB' }] },
+      { type: 'select', key: 'onDevicePreset', label: 'Modell-Mix', options: [
+        { value: 'apple', label: 'Standard (von Apple validiert) ≈ 1,1 GB' },
+        { value: 'fp16', label: 'fp16 ≈ 1,5 GB (max. Qualität)' },
+        { value: 'compact', label: 'compact ≈ 676 MB (EXPERIMENTELL: kann Buchstabensalat erzeugen)' }] },
       { type: 'select', key: 'onDeviceDevice', label: 'Inferenz-Gerät', options: [
         { value: 'auto', label: 'auto (WebGPU, sonst WASM)' }, { value: 'webgpu', label: 'WebGPU erzwingen' }, { value: 'wasm', label: 'WASM/CPU erzwingen' }] },
       { type: 'switch', key: 'turbo', label: 'Turbo (minimale Latenz)', desc: '48 statt 96 Tokens, max. 2 Sätze. Gilt ab dem nächsten Anruf.' },

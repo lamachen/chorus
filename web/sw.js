@@ -11,7 +11,7 @@
  *   - vendor/ + assets (unveränderlich, groß): cache-first
  */
 
-const STAMP = '20261023043322';
+const STAMP = '20261023154110';
 const CACHE = 'chorus-' + STAMP;
 const IMMUTABLE = ['/vendor/', '/assets/', '.onnx', '.wasm'];
 

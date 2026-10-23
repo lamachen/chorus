@@ -114,7 +114,7 @@ ul{list-style:none}
 #screen-call{background:#000}
 
 /* ---- oben: Charakter-/App-Seite ---- */
-.her{flex:0 0 auto;display:flex;flex-direction:column;gap:6px;padding:8px 16px 8px;
+.her{flex:1 1 0;min-height:0;display:flex;flex-direction:column;justify-content:space-between;gap:6px;padding:8px 16px 8px;
   background:radial-gradient(120% 90% at 50% 0%,#141a26 0%,#0a0d14 70%)}
 .her-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
 .her-id{display:flex;align-items:center;gap:11px;min-width:0}
@@ -128,7 +128,7 @@ ul{list-style:none}
 .ghost-ic[data-on="false"]{opacity:.4}
 .call-timer{font-variant-numeric:tabular-nums;font-size:12.5px;color:var(--fg2);
   background:rgba(255,255,255,.06);padding:4px 9px;border-radius:999px;white-space:nowrap}
-.her-sub-wrap{min-height:46px;display:flex;align-items:center;justify-content:center;padding-bottom:2px}
+.her-sub-wrap{flex:1 1 auto;min-height:40px;display:flex;align-items:center;justify-content:center;padding-bottom:2px}
 
 .sub{max-width:100%;font-size:13.5px;line-height:1.35;padding:6px 11px;border-radius:12px;text-align:center}
 .her-sub{background:hsl(var(--hue) 55% 45% / .26);border:1px solid hsl(var(--hue) 60% 60% / .22);color:var(--fg)}
@@ -136,14 +136,14 @@ ul{list-style:none}
 .you-sub{background:rgba(59,157,255,.16);border:1px solid rgba(59,157,255,.2);color:#bcd7ff;font-size:12.5px}
 
 /* ---- Mitte: echte Audio-Waveform als Trennelement ---- */
-.wavewrap{flex:0 0 auto;position:relative;height:88px;background:linear-gradient(#0a0d14,#05070b);
+.wavewrap{flex:0 0 96px;position:relative;height:96px;background:linear-gradient(#0a0d14,#05070b);
   border-top:1px solid #161c28;border-bottom:1px solid #161c28}
 #waveform{position:absolute;inset:0;width:100%;height:100%;display:block}
 .wavetag{position:absolute;left:10px;font-size:8.5px;letter-spacing:.18em;color:var(--fg3);font-weight:700;pointer-events:none}
 .wavetag.top{top:5px}.wavetag.bottom{bottom:5px}
 
 /* ---- unten: deine Seite ---- */
-.mine{flex:1 1 auto;min-height:0;position:relative;background:#000;overflow:hidden}
+.mine{flex:1 1 0;min-height:0;position:relative;background:#000;overflow:hidden}
 #modelview{position:absolute;background:#000;display:block}
 #modelview.nosmooth{image-rendering:pixelated}
 .mv-hud{position:absolute;left:0;right:0;top:0;display:flex;gap:6px;padding:7px 8px;align-items:center;flex-wrap:wrap;pointer-events:none}

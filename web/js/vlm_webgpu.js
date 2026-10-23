@@ -23,14 +23,30 @@ const CDN = [
 
 export const MODEL_ID = 'onnx-community/FastVLM-0.5B-ONNX';
 
+/* NUR von Apple validierte Mischungen als Standard: uint8-Vision/Embeddings
+ * erzeugen nachweislich Buchstabensalat - deshalb nicht mehr Default. */
 export const DTYPE_PRESETS = {
-  compact: { embed_tokens: 'uint8', vision_encoder: 'uint8', decoder_model_merged: 'q4' },
-  balanced: { embed_tokens: 'fp16', vision_encoder: 'uint8', decoder_model_merged: 'q4' },
   apple: { embed_tokens: 'fp16', vision_encoder: 'q4', decoder_model_merged: 'q4' },
   fp16: { embed_tokens: 'fp16', vision_encoder: 'fp16', decoder_model_merged: 'fp16' },
+  compact: { embed_tokens: 'uint8', vision_encoder: 'uint8', decoder_model_merged: 'q4' },
 };
 
-export const PRESET_MB = { compact: 676, balanced: 812, apple: 1095, fp16: 1516 };
+export const PRESET_MB = { apple: 1095, fp16: 1516, compact: 676 };
+
+/** Buchstabensalat-Erkennung: verhindert, dass Müll in die System-TTS geht. */
+export function looksGibberish(text) {
+  const t = String(text || '').replace(/[^\p{L}\s]/gu, '').toLowerCase().trim();
+  if (t.length < 12) return false;
+  const vowels = (t.match(/[aeiouäöüáéíóúàèìòù]/g) || []).length;
+  const spaces = (t.match(/\s/g) || []).length;
+  const letters = (t.match(/\p{L}/gu) || []).length;
+  if (!letters) return false;
+  if (vowels / letters < 0.09) return true;          // keine Vokale -> Salat
+  if (spaces / letters < 0.04) return true;          // keine Wortgrenzen
+  if (/(.)\1{6,}/.test(t)) return true;             // Zeichenwiederholung
+  if (/(..\1{0,1})\1{3,}/.test(t) && spaces < 3) return true;
+  return false;
+}
 
 let _T = null;
 async function loadTransformers() {
@@ -206,6 +222,19 @@ export class OnDeviceVLM {
 
   cancel() { this.cancelled = true; }
 
+  /** 1-Token-Warmup: kompiliert Kernel/Shader, damit der erste echte Turn
+   *  nicht minutenlang "denkt". Laeuft im Hintergrund, Fehler werden ignoriert. */
+  async warmup() {
+    if (!this.ready || this._warmed) return;
+    this._warmed = true;
+    try {
+      await Promise.race([
+        this.generate({ system: 'Antworte mit einem Wort.', history: [], userText: 'Hi', canvas: null, maxTokens: 2 }),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('warmup timeout')), 25000)),
+      ]);
+    } catch { /* warmup ist optional */ }
+  }
+
   /** Retry-Schleife von transformers.js sofort beenden (offline/Block). */
   killSwitch() { if (this.T) { try { this.T.env.allowRemoteModels = false; } catch {} } }
 }
@@ -222,9 +251,11 @@ export function splitSentences(buf) {
     else if (out.length) out[out.length - 1] += ' ' + head;
     else out.push(head);
   }
-  if (rest.trim().length > 78) {
-    const c = rest.lastIndexOf(',', 0, 78);
-    if (c > 12) { out.push(rest.slice(0, c).trim()); rest = rest.slice(c + 1); }
+  while (rest.trim().length > 64) {          // harte Kappe: TTS bekommt nie Zeilen
+    const cut = rest.lastIndexOf(' ', 64);
+    const at = cut > 24 ? cut : 64;
+    out.push(rest.slice(0, at).trim());
+    rest = rest.slice(at);
   }
   return { out, rest };
 }

@@ -23,7 +23,7 @@ async def shoot(pw, port):
     await p.wait_for_timeout(1500)
     await p.screenshot(path=f"{OUT}/1-dialer.png")
     await p.evaluate("""() => { window.__app.vlm = { ready:true, loading:false, device:'stub', preset:'compact',
-        cancel(){}, generate: async () => '' }; window.__app.enterCall(); }""")
+        cancel(){}, warmup: async () => {}, generate: async () => '' }; window.__app.enterCall(); }""")
     await p.wait_for_timeout(1500)
     await p.screenshot(path=f"{OUT}/5-call.png")
     await p.click("#btn-panel"); await p.wait_for_timeout(400)

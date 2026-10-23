@@ -56,7 +56,18 @@ export class Activation {
   observe(canvas, s) {
     const now = s.now;
     const th = this._thumb(canvas);
-    if (!th) return { score: 0, speak: false, parts: {}, reason: 'kein Bild' };
+    if (!th) {
+      // Kamera aus: reines Sprachgespräch - Initiative nur aus der Gesprächspause
+      const lull = s.lastExchange ? Math.max(0, (now - s.lastExchange) / 1000) : 0;
+      if (this.enabled && !s.userSpeaking && !s.sheSpeaking) {
+        const score = Math.min(1, (lull / 12) * this.lullGain);
+        const cooled = (now - this.lastFire) / 1000 >= this.cooldown;
+        const speak = score >= this.threshold && cooled && lull >= this.minLull;
+        if (speak) this.lastFire = now;
+        return { score, speak, parts: { lull: +lull.toFixed(1) }, reason: speak ? 'spricht von selbst' : 'Pause zu kurz' };
+      }
+      return { score: 0, speak: false, parts: {}, reason: 'beschäftigt' };
+    }
 
     const motion = this.prev ? Activation._diff(th, this.prev) : 0;
     this.prev = th;

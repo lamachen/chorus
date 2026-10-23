@@ -65,6 +65,7 @@ async def main() -> int:
           a.vlm = {
             ready: true, loading: false, device: 'stub', preset: 'compact',
             cancel() { window.__rec.cancels++; },
+            warmup: async () => {},
             generate: async (o) => {
               window.__rec.calls.push({ user: o.userText, hasCanvas: !!o.canvas, sys: (o.system||'').slice(0,40), hist: (o.history||[]).length });
               const reply = 'Ich sehe dich gerade deutlich. Magst du erzählen, was du machst?';
@@ -135,6 +136,22 @@ async def main() -> int:
         # Stufe 7: History wächst korrekt (Kontext für Folgerunden)
         h = await page.evaluate("() => window.__app.vlmHistory.length")
         check("Kette 7: Gesprächs-History für Kontext", h >= 4, f"{h} Einträge")
+
+        # Stufe 8: Gibberish-Gate -> nichts davon darf die TTS erreichen
+        await page.evaluate("""() => {
+          window.__ttsQ.length = 0;
+          window.__app.vlm.generate = async (o) => {
+            const salad = 'xkcd qmrv bblt nnng ssss dddd ffff gggh hhjj kkkl mmnn';
+            const words = salad.split(' ');
+            for (let i = 0; i < words.length; i++) { o.onDelta && o.onDelta(words[i] + ' '); await new Promise(r => setTimeout(r, 5)); }
+            return salad;
+          };
+          window.__app.onAsrFinal('Und jetzt sag mal was dazu');
+        }""")
+        await page.wait_for_timeout(2500)
+        g = await page.evaluate("""() => ({ q: window.__ttsQ.length, gib: window.__app._gibHit === true,
+          chip: document.getElementById('chip-vlm').textContent })""")
+        check("Kette 8: Gibberish-Gate -> TTS bekommt nichts", g['q'] == 0 and g['gib'], str(g))
 
         await browser.close()
     httpd.shutdown()
