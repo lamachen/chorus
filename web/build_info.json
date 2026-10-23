@@ -1,6 +1,6 @@
 {
- "ts": "2026-10-23T02:25:03Z",
- "note": "On-Device-Demomodus (serverless), Latenz-KPIs TTFT/TTFA, Turbo-Profil, WebGPU-Probe, Pages-Workflow",
+ "ts": "2026-10-23T02:27:23Z",
+ "note": "Pages-Demo verifiziert (serverless, Live-Test ohne Server); Screenshot shots/9-pages-demo.png",
  "app": "CHORUS · FastVLM Live-Vision-Sprachchat",
  "pages": "https://lamachen.github.io/chorus/web/index.html"
 }
