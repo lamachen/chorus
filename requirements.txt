@@ -1,0 +1,15 @@
+fastapi>=0.110
+uvicorn[standard]>=0.27
+pillow>=10.0
+python-dotenv>=1.0
+
+# ── FastVLM: genau EINEN der beiden Blöcke installieren ─────────────────
+# Apple Silicon (M1/M2/M3/M4) – empfohlen, deutlich schneller:
+#   pip install -U mlx-vlm
+#
+# NVIDIA GPU oder CPU (Linux/Windows):
+#   pip install -U torch transformers accelerate
+#
+# Ohne beide läuft der Server automatisch im Mock-Modus: die ganze App
+# (Kamera, VAD, Spracherkennung, WebSocket, TTS, Initiative) funktioniert,
+# nur antwortet eine eingebaute Platzhalter-Persona statt der Modellgewichte.

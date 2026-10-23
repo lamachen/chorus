@@ -1,0 +1,16 @@
+{
+  "name": "FastVLM Video-Chat",
+  "short_name": "FastVLM Call",
+  "description": "Telefon-App für Live-Vision-Sprachchat mit Apples FastVLM und der System-Sprachausgabe",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#07080c",
+  "theme_color": "#0b0d12",
+  "lang": "de",
+  "icons": [
+    { "src": "assets/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "assets/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
