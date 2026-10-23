@@ -1,6 +1,6 @@
 {
- "ts": "2026-10-23T02:41:23Z",
- "note": "Stufe 3: echtes On-Device-VLM (FastVVM-0.5B-ONNX via transformers.js/WebGPU) mit dtype-Presets, Engine-Modi auto/server/ondevice/demo, Contract-Test",
+ "ts": "2026-10-23T02:42:50Z",
+ "note": "Screenshot On-Device-Dialog; Live-Pages-Verifikation (Dialog + Demo-Modus) ",
  "app": "CHORUS · FastVLM Live-Vision-Sprachchat",
  "pages": "https://lamachen.github.io/chorus/web/index.html"
 }
