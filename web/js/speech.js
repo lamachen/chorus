@@ -211,6 +211,8 @@ export class SystemASR {
     this.restartDelay = 220;
     this.restarts = 0;
     this.lastFinalAt = 0;
+    this.lastActivityAt = performance.now();
+    this.startedAt = 0;
     this.pausedForTTS = false;
   }
 
@@ -232,9 +234,9 @@ export class SystemASR {
     r.maxAlternatives = 1;
     r.lang = this.lang;
 
-    r.onstart = () => { this.cb.onState && this.cb.onState('listening'); };
-    r.onaudiostart = () => { this.cb.onState && this.cb.onState('listening'); };
-    r.onspeechstart = () => { this.cb.onSpeech && this.cb.onSpeech(true); };
+    r.onstart = () => { this.startedAt = performance.now(); this.lastActivityAt = this.startedAt; this.cb.onState && this.cb.onState('listening'); };
+    r.onaudiostart = () => { this.lastActivityAt = performance.now(); this.cb.onState && this.cb.onState('listening'); };
+    r.onspeechstart = () => { this.lastActivityAt = performance.now(); this.cb.onSpeech && this.cb.onSpeech(true); };
     r.onspeechend = () => { this.cb.onSpeech && this.cb.onSpeech(false); };
 
     r.onresult = (e) => {
@@ -244,6 +246,7 @@ export class SystemASR {
         const txt = res[0].transcript;
         if (res.isFinal) {
           const t = txt.trim();
+          this.lastActivityAt = performance.now();
           if (t) {
             this.lastFinalAt = performance.now();
             this.cb.onFinal && this.cb.onFinal(t, res[0].confidence || 0);
@@ -290,6 +293,19 @@ export class SystemASR {
     if (this.rec) { try { this.rec.stop(); } catch {} }
     if (!temporary) this.rec = null;
     this.cb.onState && this.cb.onState(temporary ? 'paused' : 'stopped');
+  }
+
+  /** Health-Watchdog: erkannt nichts mehr, obwohl er laufen soll? Hart neu bauen. */
+  healthTick() {
+    if (!this.supported || !this.wantRunning || this.pausedForTTS) return null;
+    const idle = performance.now() - this.lastActivityAt;
+    if (idle > 25000) {
+      this.lastActivityAt = performance.now();
+      try { this.rec && this.rec.abort && this.rec.abort(); } catch {}
+      try { this._create(); this.rec.start(); } catch {}
+      return 'recreated';
+    }
+    return null;
   }
 
   flushInterim() { const i = this.interim; this.interim = ''; return i; }

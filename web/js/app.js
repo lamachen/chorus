@@ -25,6 +25,7 @@ const DEFAULTS = {
   voiceURI: '', rate: 1.0, pitch: 1.05, volume: 1,
   // hands-free audio
   engineMode: 'auto', onDevicePreset: 'compact',
+  cameraFacing: 'environment', mirrorMode: 'auto',
   handsFree: true, neuralVad: true, vadOnset: 0.55, vadOffset: 0.35,
   vadHangover: 620, halfDuplex: true, bargeIn: true,
   // frames handed to FastVLM
@@ -65,7 +66,7 @@ class App {
     this.buildInfo = null;
     this.tts = new SystemTTS({
       onVoices: (v) => this.onVoices(v),
-      onStart: () => this.onTtsStart(),
+      onStart: (t) => { this._curTtsText = t; this.onTtsStart(t); },
       onEnd: () => this.onTtsEnd(),
       onCancel: () => this.onTtsEnd(true),
       onSentenceEnd: (t) => { this.subHer(t); },
@@ -95,15 +96,85 @@ class App {
     this.vision = new Vision({
       video: UI.$('cam'), grab: UI.$('grab'), view: UI.$('modelview'),
       size: this.s.frameSize, ratio: this.s.ratio, quality: this.s.quality,
-      intervalMs: this.s.intervalMs, mirror: this.s.mirror, mode: this.s.previewMode,
+      intervalMs: this.s.intervalMs, mirrorMode: this.s.mirrorMode,
+      facing: this.s.cameraFacing, mode: this.s.previewMode,
       onFrame: (id, buf, meta) => this.sendFrame(id, buf, meta),
       onStats: (st) => this.onVisionStats(st),
       onError: (e) => UI.toast('Kamera: ' + e),
     });
   }
 
+  buildWaves() {
+    const mk = (id, n) => { const w = UI.$(id); w.innerHTML = ''; for (let i = 0; i < n; i++) w.appendChild(UI.el('i')); };
+    mk('wave-you', 10); mk('wave-her', 14);
+  }
+
+  /** Echte Pegel: Mikro-RMS (Worklet) + TTS-Word-Boundaries / Satzfortschritt */
+  renderAudio() {
+    cancelAnimationFrame(this._rafId);
+    const loop = () => {
+      this._rafId = requestAnimationFrame(loop);
+      if (this.state !== 'in-call') return;
+      const now = performance.now();
+
+      // ---- DU: echter Mikro-RMS-Verlauf ----
+      const lvl = this.vad?.running ? this.vad.level : 0;
+      this._micHist = (this._micHist || []).concat(lvl).slice(-10);
+      const yb = UI.$('wave-you').children;
+      for (let i = 0; i < yb.length; i++) {
+        const v = this._micHist[this._micHist.length - yb.length + i] || 0;
+        const h = Math.max(2, Math.min(30, Math.pow(Math.min(1, v * 9), 0.7) * 30));
+        yb[i].style.height = h + 'px';
+        yb[i].classList.toggle('idle', v < 0.004);
+      }
+
+      // ---- SIE: Hüllkurve aus echten Word-Boundary-Events ----
+      if (this.tts.speaking && this._boundCount === 0) this.herEnv = Math.max(this.herEnv || 0, 0.3);
+      this.herEnv = (this.herEnv || 0) * 0.90;
+      const hb = UI.$('wave-her').children;
+      const shape = [0.45, 0.7, 1, 0.8, 0.6, 0.9, 1, 0.75, 0.55, 0.85, 0.95, 0.65, 0.5, 0.4];
+      for (let i = 0; i < hb.length; i++) {
+        const h = Math.max(2, Math.min(30, (this.herEnv || 0) * 30 * shape[i]));
+        hb[i].style.height = h + 'px';
+        hb[i].classList.toggle('idle', (this.herEnv || 0) < 0.03);
+      }
+      const ring = UI.$('voice-ring');
+      if (ring) { ring.style.opacity = Math.min(0.85, (this.herEnv || 0) * 0.9); ring.style.transform = `scale(${0.6 + (this.herEnv || 0) * 0.5})`; }
+      const prog = UI.$('herprog').firstElementChild;
+      if (prog) {
+        const p = this.tts.speaking && this._sentEst ? Math.min(1, (now - this._sentStart) / this._sentEst) : 0;
+        prog.style.width = (p * 100).toFixed(1) + '%';
+      }
+
+      // ---- Barge-in zweiter Kanal: Level-Spike über Noisefloor ----
+      if (this.tts.speaking && this.s.bargeIn && this.vad?.running) {
+        const floor = this.vad.noiseFloor || 0.012;
+        if (lvl > Math.max(0.05, floor * 6)) this._spikeMs = (this._spikeMs || 0) + 16; else this._spikeMs = 0;
+        if (this._spikeMs > 180 && now - (this._lastBarge || 0) > 1500) {
+          this._lastBarge = now; this._spikeMs = 0;
+          this.onSpeechStart(true);
+        }
+      } else this._spikeMs = 0;
+
+      // ---- ASR-Gesundheit ----
+      if (this.s.handsFree && this.asr.supported) {
+        const rec = this.asr.healthTick();
+        if (rec) this.setChip('chip-asr', 'ASR neu gestartet', false, true);
+        const blind = this.asr.wantRunning && !this.tts.speaking &&
+          (now - this.asr.lastFinalAt > 12000) && (now - (this.lastVadSpeechEnd || 0) < 8000);
+        if (blind) {
+          this._asrBlind = (this._asrBlind || 0) + 1;
+          if (this._asrBlind === 90) { this.setChip('chip-asr', 'ASR liefert nichts', false, true); this.asr.healthTick(true); }
+          if (this._asrBlind === 200) { UI.toast('Spracherkennung hört dich nicht – Tipp-Fallback aktiviert', 5000); this.enableTextFallback(); }
+        } else this._asrBlind = 0;
+      }
+    };
+    loop();
+  }
+
   /* ================= boot ================= */
   async boot() {
+    this.buildWaves();
     UI.startClock(UI.$('sb-time'));
     this.applyPersisted();
     this.wireStatic();
@@ -216,8 +287,17 @@ class App {
       this.vision.setPaused(p);
       UI.$('btn-freeze').textContent = p ? 'Weiter' : 'Pause';
     };
-    UI.$('modelview').onclick = () => this.vision.flip().then((f) =>
-      UI.toast(f === 'user' ? 'Frontkamera' : 'Hauptkamera'));
+    UI.$('btn-flip').onclick = () => this.vision.flip().then((f) => {
+      UI.toast(f === 'user' ? 'Frontkamera (gespiegelt wie Selfie)' : 'Rückkamera');
+      UI.$('btn-torch').hidden = !this.vision.hasTorch;
+      UI.$('btn-torch').dataset.on = 'false';
+    });
+    UI.$('btn-torch').onclick = () => {
+      this.vision.setTorch(!this.vision.torch).then((ok) => {
+        UI.$('btn-torch').dataset.on = String(this.vision.torch);
+        if (!ok) UI.toast('Kein Blitz an dieser Kamera verfügbar');
+      });
+    };
     UI.$('sub-you').onclick = () => this.commitNow();
 
     document.addEventListener('visibilitychange', () => {
@@ -325,6 +405,7 @@ class App {
     }, 500);
     if (this.s.handsFree && this.asr.supported) this.asr.start();
     else if (!this.asr.supported) this.enableTextFallback();
+    this.renderAudio();
     this.addSys(`verbunden · ${this.server?.engine?.backend || '?'} · ${this.server?.engine?.model?.split('/').pop() || ''}`);
   }
 
@@ -359,6 +440,8 @@ class App {
     this.asr.stop();
     this.vad.stop();
     this.vision.stop();
+    cancelAnimationFrame(this._rafId);
+    this.herEnv = 0;
     UI.keepAwake(false);
     try { this.sendObj({ t: 'bye' }); } catch {}
     try { this.ws && this.ws.close(); } catch {}
@@ -599,20 +682,19 @@ class App {
     UI.$('hud-frame').textContent = `frame #${st.id}`;
     UI.$('hud-size').textContent = `${st.w}×${st.h} · ${st.kb} KB`;
     UI.$('hud-rate').textContent = `${st.fps.toFixed(2)} fps → modell`;
-    UI.$('chip-vlm').title = `Kamera ${st.src} · ${st.mode} · ${st.mirror ? 'gespiegelt' : 'nicht gespiegelt'}`;
+    UI.$('chip-vlm').title = `Kamera ${st.src} · ${st.facing} · ${st.mirror ? 'gespiegelt' : 'ungespiegelt'} · torch ${st.torch ? 'an' : 'aus'}`;
+    const tb = UI.$('btn-torch');
+    if (tb) { tb.hidden = !st.hasTorch; tb.dataset.on = String(st.torch); }
   }
 
   /* ================= voice loop ================= */
   onLevel(rms, p) {
-    if (!this.s.subtitles) return;
-    const bars = document.querySelectorAll('#wave i');
-    const n = Math.min(bars.length, Math.round(p * bars.length));
-    bars.forEach((b, i) => { if (!document.getElementById('her').classList.contains('speaking')) b.style.height = (i < n ? 4 + p * 26 * (0.6 + Math.random() * 0.6) : 4) + 'px'; });
-    this.setChip('chip-asr', `ASR ${this.asr.wantRunning ? 'läuft' : 'aus'} · ${(p * 100) | 0}%`, p > 0.4);
+    this.setChip('chip-asr', `ASR ${this.asr.wantRunning ? (this.asr.pausedForTTS ? 'wartet' : 'läuft') : 'aus'} · Mic ${(p * 100) | 0}%`, p > 0.4);
   }
 
-  onSpeechStart() {
+  onSpeechStart(fromSpike = false) {
     if (this.state !== 'in-call') return;
+    if (fromSpike && this.tts.speaking) this.addSys('barge-in über Mikro-Pegel');
     this.sendObj({ t: 'vad', speaking: true });
     UI.$('her').classList.add('listening');
     if (this.tts.speaking && this.s.bargeIn) {
@@ -625,6 +707,7 @@ class App {
   }
 
   onSpeechEnd(e) {
+    this.lastVadSpeechEnd = performance.now();
     this.sendObj({ t: 'vad', speaking: false });
     UI.$('her').classList.remove('listening');
     if (e.tooShort) return;
@@ -661,7 +744,11 @@ class App {
   }
 
   /* ================= TTS state ================= */
-  onTtsStart() {
+  onTtsStart(text) {
+    this._boundCount = 0;
+    this._sentStart = performance.now();
+    this._sentEst = 600 + ((text || '').length / Math.max(0.4, this.tts.rate)) * 62;
+    this.herEnv = 0.7;
     if (this.commitAt) {
       const ttfa = performance.now() - this.commitAt;
       this.perf.ttfa.push(ttfa); this.perf.ttfa = this.perf.ttfa.slice(-12);
@@ -676,6 +763,9 @@ class App {
     UI.$('call-state').textContent = 'spricht…';
   }
   onTtsEnd(cancelled) {
+    this.herEnv = 0;
+    const prog = UI.$('herprog') && UI.$('herprog').firstElementChild;
+    if (prog) prog.style.width = '0%';
     UI.$('her').classList.remove('speaking');
     this.vad.setSheSpeaks(false);
     if (this.s.halfDuplex && !cancelled) this.asr.setPausedForTTS(false);
@@ -684,9 +774,13 @@ class App {
     document.querySelectorAll('#wave i').forEach(b => b.style.height = '');
   }
   onBoundary(e) {
-    const bars = document.querySelectorAll('#wave i');
-    const i = Math.floor(Math.random() * bars.length);
-    bars.forEach((b, k) => b.style.height = (Math.abs(k - i) < 4 ? 8 + Math.random() * 22 : 4) + 'px');
+    // echtes Wort-Event der System-TTS -> Hüllkurve ansteuern
+    this._boundCount = (this._boundCount || 0) + 1;
+    this.herEnv = 1;
+    if (e && typeof e.charIndex === 'number' && this._sentEst) {
+      const txt = this._curTtsText || '';
+      if (txt.length) this._sentStart = performance.now() - (e.charIndex / txt.length) * this._sentEst;
+    }
   }
 
   /* ================= transcript / subtitles ================= */
@@ -767,7 +861,14 @@ class App {
       { type: 'select', key: 'ratio', label: 'Ausschnitt', options: [{ value: '1:1', label: 'Quadrat (exakt wie FastVLM croppt)' }, { value: '4:3', label: '4:3' }, { value: '16:9', label: '16:9' }] },
       { type: 'range', key: 'intervalMs', label: 'Frame-Intervall', attrs: { min: 300, max: 4000, step: 100 }, fmt: v => v + ' ms (' + (1000 / v).toFixed(1) + ' fps)' },
       { type: 'range', key: 'quality', label: 'JPEG-Qualität', attrs: { min: 0.4, max: 0.95, step: 0.05 }, fmt: v => (v * 100).toFixed(0) + '%' },
-      { type: 'switch', key: 'mirror', label: 'Selfie-Spiegelung', desc: 'Spiegelt Aufnahme UND Anzeige identisch – die Vorschau bleibt exakt das, was das Modell bekommt. Aus = das Modell kann Text besser lesen.' },
+      { type: 'select', key: 'cameraFacing', label: 'Standard-Kamera', options: [
+        { value: 'environment', label: 'Rückkamera (Standard)' },
+        { value: 'user', label: 'Frontkamera' }] },
+      { type: 'select', key: 'mirrorMode', label: 'Spiegelung', options: [
+        { value: 'auto', label: 'auto (Front gespiegelt, Rück nicht)' },
+        { value: 'on', label: 'immer spiegeln' },
+        { value: 'off', label: 'nie spiegeln' }],
+        desc: 'Spiegelung gilt identisch für Aufnahme UND Vorschau – die untere Hälfte bleibt exakt das, was das Modell sieht.' },
       { type: 'select', key: 'previewMode', label: 'Vorschau unten', options: [{ value: 'exact', label: 'exakte Modell-Frames (Standard)' }, { value: 'fluid', label: 'flüssiges Kamerabild + Frame-Marker' }] },
       { type: 'switch', key: 'pixelExact', label: 'Pixelhart skalieren', desc: 'Deaktiviert die Glättung der Vorschau, damit du 1:1 siehst, was im JPEG steht.' },
 
@@ -831,7 +932,12 @@ class App {
       case 'handsFree': v ? this.asr.start() : this.asr.stop(); break;
       case 'subtitles': document.querySelector('.subs').style.display = v ? '' : 'none'; break;
       case 'pixelExact': UI.$('modelview').classList.toggle('nosmooth', v); break;
-      case 'mirror': this.vision.mirror = v; break;
+      case 'mirrorMode': this.vision.setMirrorMode(v); break;
+      case 'cameraFacing':
+        this.s.cameraFacing = v;
+        this.vision.facing = v;
+        this.vision.restart().then(() => { UI.$('btn-torch').hidden = !this.vision.hasTorch; });
+        break;
       case 'previewMode': this.vision.setMode(v); break;
       case 'frameSize': this.vision.size = v; break;
       case 'ratio': this.vision.ratio = v; break;

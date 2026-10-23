@@ -1,6 +1,6 @@
 {
- "ts": "2026-10-23T02:42:50Z",
- "note": "Screenshot On-Device-Dialog; Live-Pages-Verifikation (Dialog + Demo-Modus) ",
+ "ts": "2026-10-23T02:57:34Z",
+ "note": "Rückkamera als Standard, Torch-Button, Kamera-Wechsel-Button; Audio-Viz aus echten Signalen (Mik-RMS + TTS-Word-Boundaries); ASR-Health-Watchdog + Blind-Detektion + Doppel-Barge-in",
  "app": "CHORUS · FastVLM Live-Vision-Sprachchat",
  "pages": "https://lamachen.github.io/chorus/web/index.html"
 }

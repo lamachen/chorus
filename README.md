@@ -164,6 +164,33 @@ effektive Frame-Rate Richtung Modell. Optional gibt es den Komfortmodus
 der exakte Modus. Doppel-Tipp auf das Bild wechselt Front-/Hauptkamera,
 „Pause“ friert die Zufuhr ein.
 
+### 2.2b Kamera & ehrliches Audio-Feedback
+
+* **Rückkamera ist Standard** (`cameraFacing: environment`), Front auf Wunsch –
+  Wechsel über den Button oben rechts im Videofeld (oder Settings).
+* **Taschenlampe**: eigener Button, sichtbar nur wenn der Kameratrack `torch`
+  kann (Android-Rückkameras); geschaltet per `applyConstraints({advanced:[{torch}]})`.
+* **Spiegelung `auto`**: Front = Selfie-Spiegel, Rück = ungespiegelt (das Modell
+  kann Text lesen). Jede Spiegelung gilt identisch für Aufnahme *und* Vorschau,
+  damit die untere Hälfte weiterhin exakt die Modell-Frames zeigt.
+* **Kein Fake im Visualizer**: Die Pegel sind echte Signale –
+  *DU*: RMS-Verlauf direkt aus dem VAD-AudioWorklet (10-Sample-Historie).
+  *SIE*: Hüllkurve aus den **Word-Boundary-Events** der System-TTS
+  (echte Wort-Zeitstempel) plus realem Satzfortschrittsbalken
+  (`charIndex`/Dauer). Keine CSS-Zufallsanimation; ohne Sprach-Events
+  bleiben die Balken ehrlich flach.
+
+### 2.2c Damit sie dich zuverlässig hört
+
+* **ASR-Health-Watchdog**: liefert die System-Spracherkennung 25 s lang nichts,
+  obwohl sie laufen soll, wird sie hart neu aufgebaut.
+* **Blind-Detektion**: hört die VAD dich sprechen, aber die ASR liefert >12 s
+  kein Final, gibt es erst einen Chip-Warnhinweis, dann automatisch das
+  Tipp-Fallback samt Toast – statt stiller Funkstille.
+* **Barge-in über zwei Kanäle**: VAD-Onset (Schwelle ×1,25, 5 Frames ≈ 160 ms
+  während sie spricht) **und** Mikro-Pegel-Spike (>6× adaptiver Noisefloor über
+  180 ms). Beide brechen ihre Stimme und die laufende Generierung ab.
+
 ### 2.2 Hands-free: VAD + System-Speech
 
 * **AudioWorklet** resampelt das Mikro auf 16 kHz und liefert 32-ms-Frames.

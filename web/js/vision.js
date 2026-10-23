@@ -35,9 +35,12 @@ export class Vision {
     this.ratio = o.ratio || '1:1';
     this.quality = o.quality || 0.8;
     this.intervalMs = o.intervalMs || 1100;
-    this.mirror = o.mirror !== false;
+    this.mirrorMode = o.mirrorMode || 'auto';          // auto | on | off
     this.mode = o.mode || 'exact';
-    this.facing = o.facing || 'user';
+    this.facing = o.facing || 'environment';            // Default: RÜCKkamera
+    this.mirror = this._mirrorFor(this.facing, o.mirror);
+    this.torch = false;
+    this.hasTorch = false;
     this.paused = false;
     this.running = false;
 
@@ -47,6 +50,33 @@ export class Vision {
     this.gctx = this.grab.getContext('2d', { alpha: false, willReadFrequently: false });
     this.vctx = this.view.getContext('2d', { alpha: false });
     this._flash = 0;
+  }
+
+  _mirrorFor(facing, o) {
+    if (o && o.mirrorMode && o.mirrorMode !== 'auto') return o.mirrorMode === 'on';
+    if (this && this.mirrorMode && this.mirrorMode !== 'auto') return this.mirrorMode === 'on';
+    return facing === 'user';      // Front = Selfie-Spiegel, Rück = ungespiegelt
+  }
+
+  async restart() {
+    const wasRunning = this.running;
+    this.stop();
+    if (wasRunning) await this.start();
+  }
+
+  setMirrorMode(m) {
+    this.mirrorMode = m;
+    this.mirror = m === 'auto' ? this.facing === 'user' : m === 'on';
+  }
+
+  async setTorch(on) {
+    const track = this.stream && this.stream.getVideoTracks()[0];
+    if (!track || !this.hasTorch) return false;
+    try {
+      await track.applyConstraints({ advanced: [{ torch: !!on }] });
+      this.torch = !!on;
+      return true;
+    } catch (e) { this.onError('torch: ' + e.message); return false; }
   }
 
   dims() {
@@ -66,13 +96,14 @@ export class Vision {
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: false,
       video: {
-        facingMode: this.facing,
+        facingMode: { ideal: this.facing },
         width: { ideal: Math.max(w, h) },
         height: { ideal: Math.max(w, h) },
         frameRate: { ideal: 30, max: 30 },
       },
     });
     this.stream = stream;
+    this._probeTrack();
     this.video.srcObject = stream;
     this.video.setAttribute('playsinline', '');
     try { await this.video.play(); } catch (e) { this.onError('video.play: ' + e.message); }
@@ -110,17 +141,30 @@ export class Vision {
     if (!p) this._tick();
   }
 
+  _probeTrack() {
+    const track = this.stream && this.stream.getVideoTracks()[0];
+    this.track = track || null;
+    try { this.hasTorch = !!(track && track.getCapabilities && track.getCapabilities().torch); }
+    catch { this.hasTorch = false; }
+    this.torch = false;
+    const actual = track && track.getSettings ? track.getSettings().facingMode : null;
+    if (actual) this.facing = actual;
+    if (this.mirrorMode === 'auto') this.mirror = this.facing === 'user';
+  }
+
   async flip() {
     this.facing = this.facing === 'user' ? 'environment' : 'user';
+    if (this.mirrorMode === 'auto') this.mirror = this.facing === 'user';
     if (!this.stream) return this.facing;
     try {
       const s = await navigator.mediaDevices.getUserMedia({
-        audio: false, video: { facingMode: this.facing, width: { ideal: Math.max(this.view.width, this.view.height) } },
+        audio: false, video: { facingMode: { ideal: this.facing }, width: { ideal: Math.max(this.view.width, this.view.height) } },
       });
       this.stream.getTracks().forEach(t => t.stop());
       this.stream = s;
       this.video.srcObject = s;
       await this.video.play();
+      this._probeTrack();
     } catch (e) { this.onError('flip: ' + e.message); }
     return this.facing;
   }
@@ -225,6 +269,7 @@ export class Vision {
       kb: Math.round(this.lastBytes / 1024), fps: this.sentTimes.length / 5,
       src: this.video ? `${this.video.videoWidth}×${this.video.videoHeight}` : '-',
       paused: this.paused, mode: this.mode, mirror: this.mirror, facing: this.facing,
+      torch: this.torch, hasTorch: this.hasTorch,
     });
   }
 }

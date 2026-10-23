@@ -129,19 +129,24 @@ ul{list-style:none}
 .camoff small{font-size:10.5px;color:var(--fg3);text-align:center;max-width:230px;line-height:1.35}
 .camoff-ring{position:absolute;left:50%;top:16px;width:96px;height:96px;margin:-48px 0 0 -48px;border-radius:50%;
   border:2px solid hsl(var(--hue) 80% 60% / .5);opacity:0;transform:scale(.6);pointer-events:none}
-.speaking .camoff-ring{animation:ring 1.6s ease-out infinite}
 @keyframes ring{0%{opacity:.75;transform:scale(.55)}100%{opacity:0;transform:scale(1.5)}}
 
-.wave{display:flex;align-items:center;gap:3px;height:34px}
-.wave i{display:block;width:3px;height:4px;border-radius:2px;background:hsl(var(--hue) 85% 66%);opacity:.35;
-  transition:height .09s ease,opacity .2s}
-.speaking .wave i{opacity:.95;animation:bar .9s ease-in-out infinite}
-.speaking .wave i:nth-child(2n){animation-duration:.62s}
-.speaking .wave i:nth-child(3n){animation-duration:1.15s}
-.speaking .wave i:nth-child(4n){animation-delay:-.3s}
-.speaking .wave i:nth-child(5n){animation-delay:-.55s}
-@keyframes bar{0%,100%{height:5px}50%{height:30px}}
-.listening .wave i{background:var(--blue);animation:bar .8s ease-in-out infinite}
+.waves{display:flex;align-items:flex-end;justify-content:center;gap:26px;height:52px}
+.wgroup{display:flex;flex-direction:column;align-items:center;gap:3px}
+.wgroup small{font-size:8.5px;letter-spacing:.14em;color:var(--fg3);font-weight:700}
+.wave{display:flex;align-items:flex-end;gap:2.5px;height:30px}
+.wave i{display:block;width:3px;height:2px;border-radius:2px;transition:height .06s linear;opacity:.9}
+.wave.her i{background:hsl(var(--hue) 85% 66%)}
+.wave.you i{background:var(--blue)}
+.wave i.idle{opacity:.28}
+.herprog{width:120px;height:2px;background:rgba(255,255,255,.12);border-radius:2px;overflow:hidden;margin-top:2px}
+.herprog i{display:block;height:100%;width:0;background:hsl(var(--hue) 85% 66%);transition:width .2s linear}
+.mv-tools{position:absolute;right:8px;top:34px;display:flex;flex-direction:column;gap:8px;z-index:3}
+.mvtool{width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+  background:rgba(6,9,14,.6);border:1px solid rgba(255,255,255,.16);color:#dfe6f3;backdrop-filter:blur(4px)}
+.mvtool .ic{width:18px;height:18px}
+.mvtool[data-on="true"]{background:var(--amber);border-color:var(--amber);color:#231a02}
+.mvtool[hidden]{display:none}
 
 .subs{flex:0 0 auto;min-height:58px;display:flex;flex-direction:column;gap:5px;align-items:center}
 .sub{max-width:100%;font-size:13.5px;line-height:1.35;padding:6px 11px;border-radius:12px;text-align:center;

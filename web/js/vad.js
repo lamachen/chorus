@@ -163,13 +163,14 @@ export class MicVad {
     this.opts = {
       neural: true,
       onset: 0.55, offset: 0.35, hangoverMs: 620, minSpeechMs: 240,
-      bargeBoost: 1.55, bargeOnsetFrames: 7, ...o.opts,
+      bargeBoost: 1.25, bargeOnsetFrames: 5, ...o.opts,
     };
     this.gate = new SpeechGate(this.opts);
     this.running = false;
     this.muted = false;
     this.level = 0;
     this.prob = 0;
+    this.noiseFloor = 0.012;
     this.info = { detector: 'none', sampleRate: 0 };
   }
 
@@ -289,6 +290,8 @@ export class MicVad {
   _probability(p) {
     this.prob = p;
     const now = performance.now();
+    // adaptiver Mikro-Noisefloor (für Level-Barge-in)
+    if (!this.gate.speaking) this.noiseFloor = 0.985 * this.noiseFloor + 0.015 * Math.max(this.level, 0.002);
     this.cb.onLevel && this.cb.onLevel(this.level, p, now);
     const ev = this.gate.feed(p, now);
     if (!ev) return;
