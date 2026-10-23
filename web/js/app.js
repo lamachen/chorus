@@ -28,7 +28,7 @@ const DEFAULTS = {
   frameSize: 768, ratio: '1:1', intervalMs: 1100, quality: 0.8,
   previewMode: 'exact', pixelExact: false, cameraFacing: 'environment', mirrorMode: 'auto',
   proactive: true, activationThreshold: 0.62, activationCooldown: 22, subtitles: true,
-  onDevicePreset: 'kleinst', onDeviceDevice: 'auto', turbo: false,
+  onDevicePreset: 'q4f16', onDeviceDevice: 'auto', turbo: false,
 };
 
 const load = () => { try { return { ...DEFAULTS, ...(JSON.parse(localStorage.getItem(KEY)) || {}) }; } catch { return { ...DEFAULTS }; } };
@@ -829,15 +829,16 @@ class App {
       { type: 'select', key: 'mirrorMode', label: 'Spiegelung', options: [{ value: 'auto', label: 'auto (Front ja, Rück nein)' }, { value: 'on', label: 'immer' }, { value: 'off', label: 'nie' }] },
 
       { group: 'On-Device-VLM' },
-      { type: 'select', key: 'onDevicePreset', label: 'Quantisierung (alle Größen)', options: [
-        { value: 'kleinst', label: 'kleinst ≈ 641 MB (Standard)' },
-        { value: 'q4f16', label: 'q4f16 ≈ 807 MB' },
-        { value: 'int8', label: 'int8 ≈ 862 MB' },
-        { value: 'uint8', label: 'uint8 ≈ 862 MB' },
-        { value: 'apple', label: 'apple-Mix ≈ 1,1 GB' },
-        { value: 'bnb4', label: 'bnb4 ≈ 1,3 GB' },
-        { value: 'q4', label: 'q4 ≈ 1,4 GB' },
-        { value: 'fp16', label: 'fp16 ≈ 1,5 GB' }] },
+      { type: 'select', key: 'onDevicePreset', label: 'Quantisierung (Talk2FastVLM-Tabelle)', options: [
+        { value: 'q4f16', label: 'q4f16 · D282/E272/V253 = 807 MB (Doku-DEFAULT)' },
+        { value: 'fp16', label: 'fp16 · D992/E272/V253 = 1517 MB (beste Genauigkeit)' },
+        { value: 'kleinst', label: 'kleinst-Mix · D282/E136/V223 = 641 MB (memory-constrained)' },
+        { value: 'int8', label: 'int8 · D503/E136/V223 = 862 MB (memory-constrained)' },
+        { value: 'uint8', label: 'uint8 · D503/E136/V223 = 862 MB (memory-constrained)' },
+        { value: 'bnb4', label: 'bnb4 · D287/E544/V505 = 1336 MB' },
+        { value: 'q4', label: 'q4 · D317/E544/V505 = 1366 MB' },
+        { value: 'apple', label: 'apple-Mix · D317/E272/V505 = 1095 MB (Demo-Wortlaut)' }] },
+      { type: 'info', key: 'presetnote', rows: [['Empfehlung', 'q4f16 für die meisten Geräte; int8/uint8 nur bei Speichernot (Qualitäts-Trade-off)']] },
       { type: 'select', key: 'onDeviceDevice', label: 'Inferenz-Gerät', options: [
         { value: 'auto', label: 'auto (WebGPU, sonst WASM)' }, { value: 'webgpu', label: 'WebGPU erzwingen' }, { value: 'wasm', label: 'WASM/CPU erzwingen' }] },
       { type: 'switch', key: 'turbo', label: 'Turbo (minimale Latenz)', desc: '48 statt 96 Tokens, max. 2 Sätze. Gilt ab dem nächsten Anruf.' },

@@ -105,10 +105,20 @@ Turns nehmen bevorzugt den Verlauf auf.
 
 * `onnx-community/FastVLM-0.5B-ONNX` über **transformers.js 3.7.5** (dieselbe
   Kette wie Apples `apple/fastvlm-webgpu`-Demo), WebGPU sonst WASM.
-* Presets (nur öffentlich validierte Mixe): **Standard `q4f16` komplett**
-  (Talk2FastVLM-Default, ≈ 807 MB), `apple` (embed fp16 / vision q4 / decoder
-  q4, ≈ 1,1 GB, Mix aus Apples Demo & Card), `fp16` (≈ 1,5 GB). uint8/int8
-  ersatzlos gestrichen (nur als Notlagen-Stufe dokumentiert, Salat-Risiko).
+* Quantisierungen exakt nach der öffentlichen Tabelle (Talk2FastVLM /
+  onnx-community), alle Varianten wählbar, Größen pro Komponente
+  (Decoder/Embed/Vision):
+
+  | Variante | D | E | V | Summe | Einordnung |
+  |---|---|---|---|---|---|
+  | **q4f16 (DEFAULT)** | 282 | 272 | 253 | 807 MB | Doku-Empfehlung „for most users" |
+  | fp16 | 992 | 272 | 253 | 1517 MB | „better accuracy" |
+  | kleinst-Mix | 282 | 136 | 223 | 641 MB | memory-constrained (uint8 E/V + q4f16 D) |
+  | int8 | 503 | 136 | 223 | 862 MB | memory-constrained |
+  | uint8 | 503 | 136 | 223 | 862 MB | memory-constrained (Salat-Verdacht, Gate wacht) |
+  | apple-Mix | 317 | 272 | 505 | 1095 MB | Wortlaut der Apple-WebGPU-Demo |
+  | bnb4 | 287 | 544 | 505 | 1336 MB | — |
+  | q4 | 317 | 544 | 505 | 1366 MB | — |
 * Generate-Parameter wie Doku: `do_sample:false`, `repetition_penalty:1.2`
   (Apples Demo-Wert), `TextStreamer(skip_prompt:true)`.
 * Load startet **beim Seitenstart** (Dialer-Chip: `VLM lädt x %` → `bereit` →
