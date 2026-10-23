@@ -1,6 +1,7 @@
 {
- "ts": "2026-10-23T02:57:34Z",
- "note": "Rückkamera als Standard, Torch-Button, Kamera-Wechsel-Button; Audio-Viz aus echten Signalen (Mik-RMS + TTS-Word-Boundaries); ASR-Health-Watchdog + Blind-Detektion + Doppel-Barge-in",
+ "ts": "2026-10-23T03:14:16Z",
+ "stamp": "20261023031416",
+ "note": "Service-Worker fix: versionierter Cache + Network-First fuer Code (kein stale Code mehr nach Deploys); Update-Toast",
  "app": "CHORUS · FastVLM Live-Vision-Sprachchat",
  "pages": "https://lamachen.github.io/chorus/web/index.html"
 }

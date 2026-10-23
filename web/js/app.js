@@ -184,7 +184,18 @@ class App {
     probeOnDevice().then((d) => { this.onDevice = d; this.renderEngineInfo(); });
     fetch('build_info.json').then(r => r.ok ? r.json() : null).then(j => { this.buildInfo = j; }).catch(() => {});
     this.checkSecureContext();
-    if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('sw.js').then((reg) => {
+        reg.addEventListener('updatefound', () => {
+          const ni = reg.installing;
+          ni && ni.addEventListener('statechange', () => {
+            if (ni.state === 'installed' && navigator.serviceWorker.controller) {
+              UI.toast('Update geladen – Seite wechselt gleich automatisch');
+            }
+          });
+        });
+      }).catch(() => {});
+    }
   }
 
   checkSecureContext() {
