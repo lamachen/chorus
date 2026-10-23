@@ -16,7 +16,7 @@ import * as UI from './ui.js';
 import { MicVad } from './vad.js';
 import { SystemTTS, SystemASR, rankVoices } from './speech.js';
 import { Vision } from './vision.js';
-import { OnDeviceVLM, onDeviceSupported, PRESET_MB, splitSentences, looksGibberish } from './vlm_webgpu.js';
+import { OnDeviceVLM, onDeviceSupported, probeAdapter, PRESET_MB, splitSentences, looksGibberish } from './vlm_webgpu.js';
 import { PERSONAS, getPersona, characterSystem, directives } from './persona.js';
 import { Activation } from './activation.js';
 
@@ -28,7 +28,7 @@ const DEFAULTS = {
   frameSize: 768, ratio: '1:1', intervalMs: 1100, quality: 0.8,
   previewMode: 'exact', pixelExact: false, cameraFacing: 'environment', mirrorMode: 'auto',
   proactive: true, activationThreshold: 0.62, activationCooldown: 22, subtitles: true,
-  onDevicePreset: 'q4f16', onDeviceDevice: 'auto', turbo: false,
+  onDevicePreset: 'kleinst', onDeviceDevice: 'auto', turbo: false,
 };
 
 const load = () => { try { return { ...DEFAULTS, ...(JSON.parse(localStorage.getItem(KEY)) || {}) }; } catch { return { ...DEFAULTS }; } };
@@ -119,7 +119,21 @@ class App {
     }
   }
 
-  probeOnDeviceInfo() { this.onDevice = onDeviceSupported(); this.renderInfo(); }
+  async probeOnDeviceInfo() {
+    this.onDevice = await probeAdapter();      // echte Adapter-Wahrheit, kein API-Flag
+    this.renderInfo();
+    const hud = UI.$('hud-gpu');
+    if (hud && this.state === 'in-call') this.updateGpuHud();
+  }
+
+  updateGpuHud(extra) {
+    const hud = UI.$('hud-gpu');
+    if (!hud) return;
+    const od = this.onDevice || {};
+    const dev = this.vlm?.device || '?';
+    hud.textContent = `HW: ${dev} · Adapter ${od.adapter ? 'JA' : 'NEIN'}${od.vendor ? ' (' + od.vendor.slice(0, 18) + ')' : ''}${extra ? ' · ' + extra : ''}`;
+    hud.className = 'hud-tag ' + (od.adapter && dev === 'webgpu' ? 'live' : dev === 'wasm' ? 'hot' : '');
+  }
 
   /** On-Device-VLM sofort beim Seitenstart laden - kein Button, kein Dialog. */
   preloadVlm() {
@@ -131,9 +145,10 @@ class App {
     if (this.vlm.ready) { label('VLM bereit', 'ok'); return; }
     label('VLM lädt…', 'load');
     this.vlm.load((msg, p) => {
-      label(`VLM ${(p * 100) | 0}% · ${String(msg).slice(0, 26)}`, 'load');
+      label(`VLM ${(p * 100) | 0} %`, 'load');     // kurz + stabil, Details im Ring/Settings
       this._vlmProg = msg;
       this._vlmP = p || 0;
+      this.renderInfo();
     }).then(() => {
       label(`VLM bereit · ${this.vlm.device}`, 'ok');
       this.setChip('chip-vlm', `VLM ${this.vlm.device} · ${this.vlm.preset}`, true);
@@ -372,6 +387,7 @@ class App {
     this._clockTimer = setInterval(() => { UI.$('call-timer').textContent = UI.fmtDur((Date.now() - this.t0) / 1000); }, 500);
     this.setChip('chip-vlm', `VLM ${this.vlm.device} · ${this.vlm.preset}`, true);
     this.setChip('chip-pro', this.s.proactive ? 'Initiative an' : 'Initiative aus', this.s.proactive);
+    this.updateGpuHud();
     this.vlm.warmup && this.vlm.warmup();
     if (this.s.handsFree && this.asr.supported) this.asr.start();
     else {
@@ -461,6 +477,7 @@ class App {
             const ttft = performance.now() - this.thinkStart;
             this.perf.ttft = ttft;
             this.setChip('chip-vlm', `1. Token ${Math.round(ttft / 1000)}s · ${this.vlm.device}`, true);
+            this.updateGpuHud(`1.Token ${(ttft / 1000).toFixed(1)}s`);
           }
           all += tk;
           this._gibAcc += tk;
@@ -812,10 +829,15 @@ class App {
       { type: 'select', key: 'mirrorMode', label: 'Spiegelung', options: [{ value: 'auto', label: 'auto (Front ja, Rück nein)' }, { value: 'on', label: 'immer' }, { value: 'off', label: 'nie' }] },
 
       { group: 'On-Device-VLM' },
-      { type: 'select', key: 'onDevicePreset', label: 'Modell-Mix', options: [
-        { value: 'q4f16', label: 'Standard q4f16 (öffentlich validiert, ≈ 807 MB)' },
-        { value: 'apple', label: 'apple-Mix (fp16/q4/q4, ≈ 1,1 GB)' },
-        { value: 'fp16', label: 'fp16 (≈ 1,5 GB, max. Qualität)' }] },
+      { type: 'select', key: 'onDevicePreset', label: 'Quantisierung (alle Größen)', options: [
+        { value: 'kleinst', label: 'kleinst ≈ 641 MB (Standard)' },
+        { value: 'q4f16', label: 'q4f16 ≈ 807 MB' },
+        { value: 'int8', label: 'int8 ≈ 862 MB' },
+        { value: 'uint8', label: 'uint8 ≈ 862 MB' },
+        { value: 'apple', label: 'apple-Mix ≈ 1,1 GB' },
+        { value: 'bnb4', label: 'bnb4 ≈ 1,3 GB' },
+        { value: 'q4', label: 'q4 ≈ 1,4 GB' },
+        { value: 'fp16', label: 'fp16 ≈ 1,5 GB' }] },
       { type: 'select', key: 'onDeviceDevice', label: 'Inferenz-Gerät', options: [
         { value: 'auto', label: 'auto (WebGPU, sonst WASM)' }, { value: 'webgpu', label: 'WebGPU erzwingen' }, { value: 'wasm', label: 'WASM/CPU erzwingen' }] },
       { type: 'switch', key: 'turbo', label: 'Turbo (minimale Latenz)', desc: '48 statt 96 Tokens, max. 2 Sätze. Gilt ab dem nächsten Anruf.' },
@@ -877,8 +899,10 @@ class App {
       ['Modell', 'FastVLM-0.5B-ONNX'],
       ['Status', v ? (v.ready ? `bereit · ${v.device} · ${v.preset}` : v.loading ? 'lädt: ' + (this._vlmProg || '') : 'Fehler: ' + (v.error || this._vlmError || '')) : 'nicht geladen'],
       ['Ladezeit', v && v.ready ? (v.loadMs / 1000).toFixed(1) + ' s' : '–'],
-      ['WebGPU', this.onDevice ? (this.onDevice.webgpu ? 'ja' : 'nein → WASM') : '…'],
-      ['Gerät', this.onDevice ? `${this.onDevice.ua} · ${this.onDevice.cores} Kerne` : '…'],
+      ['WebGPU-API', this.onDevice ? (this.onDevice.api ? 'vorhanden' : 'fehlt') : '…'],
+      ['WebGPU-Adapter (Wahrheit)', this.onDevice ? (this.onDevice.adapter ? 'JA · ' + (this.onDevice.vendor || 'ok') : 'NEIN → WASM/CPU') : 'prüfe…'],
+      ['Tatsächlich genutzt', this.vlm?.device || '–'],
+      ['Gerät', this.onDevice ? `${this.onDevice.ua} · ${this.onDevice.cores} Kerne · ${this.onDevice.memGB || '?'} GB` : '…'],
     ]);
     const avg = (a) => a && a.length ? Math.round(a.reduce((x, y) => x + y, 0) / a.length) : null;
     UI.updateInfoBlock(UI.$('settings-body'), 'perf', [

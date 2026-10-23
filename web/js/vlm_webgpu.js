@@ -31,12 +31,18 @@ export const MODEL_ID = 'onnx-community/FastVLM-0.5B-ONNX';
  *   fp16   = Qualitätsempfehlung (~1516 MB)
  * uint8/int8: ersatzlos gestrichen (nur als Notlagen-Stufe dokumentiert, Salat-Risiko). */
 export const DTYPE_PRESETS = {
+  // Standard = kleinste Dateien pro Komponente (uint8 embed/vision + q4f16 decoder)
+  kleinst: { embed_tokens: 'uint8', vision_encoder: 'uint8', decoder_model_merged: 'q4f16' },
   q4f16: { embed_tokens: 'q4f16', vision_encoder: 'q4f16', decoder_model_merged: 'q4f16' },
+  int8: { embed_tokens: 'int8', vision_encoder: 'int8', decoder_model_merged: 'int8' },
+  uint8: { embed_tokens: 'uint8', vision_encoder: 'uint8', decoder_model_merged: 'uint8' },
+  q4: { embed_tokens: 'q4', vision_encoder: 'q4', decoder_model_merged: 'q4' },
+  bnb4: { embed_tokens: 'bnb4', vision_encoder: 'bnb4', decoder_model_merged: 'bnb4' },
   apple: { embed_tokens: 'fp16', vision_encoder: 'q4', decoder_model_merged: 'q4' },
   fp16: { embed_tokens: 'fp16', vision_encoder: 'fp16', decoder_model_merged: 'fp16' },
 };
 
-export const PRESET_MB = { q4f16: 807, apple: 1095, fp16: 1516 };
+export const PRESET_MB = { kleinst: 641, q4f16: 807, int8: 862, uint8: 862, q4: 1366, bnb4: 1336, apple: 1095, fp16: 1517 };
 
 /** Buchstabensalat-Erkennung: verhindert, dass Müll in die System-TTS geht. */
 export function looksGibberish(text) {
@@ -76,6 +82,34 @@ export function onDeviceSupported() {
     cores: navigator.hardwareConcurrency || 0,
     storage: !!navigator.storage,
   };
+}
+
+/** WAHRHEIT statt Vermutung: existiert wirklich ein nutzbarer WebGPU-Adapter? */
+export async function probeAdapter() {
+  const out = {
+    api: !!navigator.gpu, adapter: false, vendor: '',
+    wasm: typeof WebAssembly === 'object',
+    cores: navigator.hardwareConcurrency || 0,
+    memGB: navigator.deviceMemory || 0,
+    ua: /iPhone|iPad/.test(navigator.userAgent) ? 'iOS' : /Android/.test(navigator.userAgent) ? 'Android' : 'Desktop',
+  };
+  if (navigator.gpu) {
+    try {
+      const ad = await navigator.gpu.requestAdapter();
+      if (ad) {
+        out.adapter = true;
+        try {
+          const i = await (ad.info ? ad.info : (ad.requestAdapterInfo && ad.requestAdapterInfo()));
+          if (i) out.vendor = [i.vendor, i.architecture, i.description].filter(Boolean).join(' ');
+        } catch {}
+        try { out.limits = !!ad.limits; } catch {}
+      }
+    } catch {}
+  }
+  out.verdict = out.adapter
+    ? `WebGPU-Adapter JA (${out.vendor || 'Vendor nicht gemeldet'})`
+    : 'WebGPU-Adapter NEIN → Inferenz läuft WASM/CPU';
+  return out;
 }
 
 export class OnDeviceVLM {
@@ -156,21 +190,20 @@ export class OnDeviceVLM {
     }
   }
 
+  /* Stabile Anzeige: Summe geladener Bytes (monoton) gegen die BEKANNTE
+   * Gesamtgröße des Presets - keine springenden Totals mehr. */
   _prog(onProgress, m) {
     if (!onProgress || !m) return;
     if (m.status === 'progress' && m.file) {
       this._files = this._files || {};
-      this._files[m.file] = [m.loaded || 0, m.total || 0];
+      this._files[m.file] = Math.max(this._files[m.file] || 0, m.loaded || 0);
     }
-    const f = this._files || {};
-    let loaded = 0, total = 0;
-    for (const k in f) { loaded += f[k][0]; total += f[k][1]; }
-    const p = total ? loaded / total : 0;
-    this._pMax = Math.max(this._pMax || 0, p);          // monoton: Balken zappelt nicht zurück
-    const cur = f[this._curFile || ''] ;
-    const name = Object.keys(f).slice(-1)[0] || '…';
-    onProgress(`${(loaded / 1e6).toFixed(0)} / ${(total / 1e6).toFixed(0)} MB · ${String(name).split('/').pop()}`,
-      this._pMax);
+    const loadedMB = Object.values(this._files || {}).reduce((a, b) => a + b, 0) / 1e6;
+    const totalMB = (PRESET_MB[this.preset] || 800) + 16;   // + Tokenizer/Config
+    const p = Math.min(1, loadedMB / totalMB);
+    this._pMax = Math.max(this._pMax || 0, p);
+    const n = Object.keys(this._files || {}).length;
+    onProgress(`${loadedMB.toFixed(0)}/${totalMB} MB · ${n}. Datei`, this._pMax);
   }
 
   /**

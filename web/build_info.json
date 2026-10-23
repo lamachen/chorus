@@ -1,7 +1,7 @@
 {
- "ts": "2026-10-23T19:58:34Z",
- "stamp": "20261023195834",
- "note": "Dokumentkonforme Inferenz: single-turn + immer ein Bild (Freeze-Frame bei Kamera aus), q4f16-Default (public validiert), uint8 raus, kein Cancel mid-generate (Discard-Flag + serialisierender Mutex wie Apples inferenceLock), rep-penalty 1.2, Ground-Truth-Messreihe im Systemtest. chain 13/13",
+ "ts": "2026-10-23T20:59:26Z",
+ "stamp": "20261023205926",
+ "note": "Download-Anzeige stabil (monotone Summe gegen bekannte Preset-Groesse, keine springenden Totals; Dialer-Label kurz + kleiner), Standard = kleinste Quantisierung (kleinst, 641 MB), alle 8 Groessen waehlbar, Hardware-WAHRHEIT im Telefonat: hud-gpu-Tag + Settings zeigen echten WebGPU-Adapter (requestAdapter/info) statt API-Flag, tatsaechlich genutztes Device und 1-Token-Zeit",
  "app": "CHORUS · FastVLM Live-Vision-Sprachchat",
  "pages": "https://lamachen.github.io/chorus/web/index.html"
 }
