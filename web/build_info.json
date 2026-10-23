@@ -1,7 +1,7 @@
 {
- "ts": "2026-10-23T04:33:00Z",
- "stamp": "20261023043300",
- "note": "Signal-Kette geschlossen und getestet: aggregierter monotoner Lade-Fortschritt, Tastatur-Eingang als gleichwertiger Eingang, sichtbares Gehoert-Transkript, Systemtest in der App (alle Stufen real gemessen), chain_test 11/11 PASS",
+ "ts": "2026-10-23T04:33:22Z",
+ "stamp": "20261023043322",
+ "note": "Smoke-Assertion an 4. Control (Tastatur-Eingang) angepasst; Doku der Signal-Kette",
  "app": "CHORUS · FastVLM Live-Vision-Sprachchat",
  "pages": "https://lamachen.github.io/chorus/web/index.html"
 }

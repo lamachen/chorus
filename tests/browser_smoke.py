@@ -116,7 +116,7 @@ async def run_once() -> int:
           wf: (() => { const c = document.getElementById('waveform'); return c.width + 'x' + c.height; })() })""")
         print("Layout:", layout)
         assert layout["waveform"] and layout["fakeElemente"] == 0 and not layout["kamerasText"]
-        assert layout["controls"] == ["btn-mute", "btn-cam", "btn-hangup"]
+        assert layout["controls"] == ["btn-mute", "btn-cam", "btn-keys", "btn-hangup"]
         assert layout["chipsImProtokoll"]
         print("OK: vertikales Layout (Charakter | Waveform-Trenner | Nutzer), keine Fake-Kamera-Box")
 
