@@ -7,75 +7,62 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>Telefon · FastVLM Video-Chat</title>
+<title>CHORUS · FastVLM Video-Chat</title>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="stylesheet" href="styles.css">
 <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
 </head>
 <body>
 
-<!-- hidden camera source: only the canvas that shows the exact model frames is visible -->
 <video id="cam" playsinline muted autoplay></video>
 <canvas id="grab" hidden></canvas>
 
 <div id="phone">
 
-  <!-- ══════════════ status bar ══════════════ -->
   <div class="statusbar">
     <span id="sb-time">--:--</span>
-    <span class="sb-mid" id="sb-carrier">FastVLM · lokal</span>
+    <span class="sb-mid" id="sb-carrier">CHORUS · on-device</span>
     <span class="sb-right">
       <svg viewBox="0 0 24 24" class="ic"><path d="M2 17h3v4H2zM7 13h3v8H7zM12 9h3v12h-3zM17 5h3v16h-3z"/></svg>
-      <svg viewBox="0 0 24 24" class="ic"><path d="M12 20.5l-1.6-1.9C7 14.9 4.7 12.7 2 11l2-2.4C7.2 10.7 9.5 12 12 14.6 14.5 12 16.8 10.7 20 8.6L22 11c-2.7 1.7-5 3.9-8.4 7.6z" opacity=".0"/><path d="M12 18.8c1.1 0 2 .9 2 2s-.9 2-2 2-2-.9-2-2 .9-2 2-2zm0-5.6c2 0 3.9.8 5.3 2.1l-1.9 2c-.9-.9-2.1-1.4-3.4-1.4s-2.5.5-3.4 1.4l-1.9-2C8.1 14 10 13.2 12 13.2zm0-5.6c3.4 0 6.5 1.3 8.8 3.5l-1.9 2C17.1 11.4 14.7 10.4 12 10.4s-5.1 1-6.9 2.7l-1.9-2C5.5 8.9 8.6 7.6 12 7.6z"/></svg>
+      <svg viewBox="0 0 24 24" class="ic"><path d="M12 18.8c1.1 0 2 .9 2 2s-.9 2-2 2-2-.9-2-2 .9-2 2-2zm0-5.6c2 0 3.9.8 5.3 2.1l-1.9 2c-.9-.9-2.1-1.4-3.4-1.4s-2.5.5-3.4 1.4l-1.9-2C8.1 14 10 13.2 12 13.2zm0-5.6c3.4 0 6.5 1.3 8.8 3.5l-1.9 2C17.1 11.4 14.7 10.4 12 10.4s-5.1 1-6.9 2.7l-1.9-2C5.5 8.9 8.6 7.6 12 7.6z"/></svg>
       <span class="batt"><i id="sb-batt"></i></span>
     </span>
   </div>
 
-  <!-- ══════════════ screen: dialer ══════════════ -->
+  <!-- ══════════ Dialer ══════════ -->
   <section class="screen active" id="screen-dialer">
     <header class="nav">
-      <button class="nav-btn ghost" id="btn-engine" title="Engine-Status">
-        <span class="dot" id="engine-dot"></span><span id="engine-label">verbinde…</span>
-      </button>
+      <button class="nav-btn ghost" id="btn-engine"><span class="dot" id="engine-dot"></span><span id="engine-label">VLM …</span></button>
       <h1 id="dialer-title">Favoriten</h1>
       <button class="nav-btn" id="btn-settings" aria-label="Einstellungen">
         <svg viewBox="0 0 24 24" class="ic"><path d="M12 8a4 4 0 100 8 4 4 0 000-8zm9 4l-2.1.4a7 7 0 01-.7 1.7l1.2 1.7-1.6 1.6-1.7-1.2a7 7 0 01-1.7.7L14 21h-4l-.4-2.1a7 7 0 01-1.7-.7L6.2 19.4 4.6 17.8l1.2-1.7a7 7 0 01-.7-1.7L3 14v-4l2.1-.4a7 7 0 01.7-1.7L4.6 6.2l1.6-1.6 1.7 1.2a7 7 0 011.7-.7L10 3h4l.4 2.1a7 7 0 011.7.7l1.7-1.2 1.6 1.6-1.2 1.7a7 7 0 01.7 1.7L21 10z"/></svg>
       </button>
     </header>
-
     <div class="body">
-      <!-- favorites -->
       <div class="tabpane active" id="pane-fav">
-        <p class="hint">Video-Chat · du sendest Bild + Ton, die andere Seite nur Ton</p>
+        <p class="hint">On-Device-Video-Chat: FastVLM sieht dein Video, System-Speech hört und spricht. Nichts verlässt das Gerät.</p>
         <ul class="contacts" id="fav-list"></ul>
       </div>
-
-      <!-- keypad -->
       <div class="tabpane" id="pane-key">
         <div class="key-display"><span id="key-num">&nbsp;</span></div>
         <div class="keypad" id="keypad"></div>
         <div class="key-actions">
           <button class="round green big" id="key-call" aria-label="Anrufen">
-            <svg viewBox="0 0 24 24" class="ic"><path d="M15.5 11.5c0-1.9-1.6-3.5-3.5-3.5s-3.5 1.6-3.5 3.5H6c0-3.3 2.7-6 6-6s6 2.7 6 6zM3 9l3-3h12l3 3v3c0 5-4 9-9 9s-9-4-9-9z" opacity="0"/><path d="M6.6 10.8c1.4 2.8 3.8 5.1 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.1.4 2.3.6 3.6.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1C10.6 21 3 13.4 3 4c0-.6.4-1 1-1h3.5c.6 0 1 .4 1 1 0 1.2.2 2.4.6 3.6.1.4 0 .8-.3 1z"/></svg>
+            <svg viewBox="0 0 24 24" class="ic"><path d="M6.6 10.8c1.4 2.8 3.8 5.1 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.1.4 2.3.6 3.6.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1C10.6 21 3 13.4 3 4c0-.6.4-1 1-1h3.5c.6 0 1 .4 1 1 0 1.2.2 2.4.6 3.6.1.4 0 .8-.3 1z"/></svg>
           </button>
           <button class="round ghost" id="key-del" aria-label="Löschen">
             <svg viewBox="0 0 24 24" class="ic"><path d="M22 3H7L1 12l6 9h15a2 2 0 002-2V5a2 2 0 00-2-2zm-3.3 12.3L17.3 17 12 11.7 6.7 17 5.3 15.6 10.6 10 5.3 4.7 6.7 3.3 12 8.6l5.3-5.3 1.4 1.4L13.4 10z"/></svg>
           </button>
         </div>
       </div>
-
-      <!-- recents -->
       <div class="tabpane" id="pane-recents">
         <ul class="contacts" id="recent-list"></ul>
         <p class="hint" id="recent-empty">Noch keine Anrufe.</p>
       </div>
-
-      <!-- contacts -->
       <div class="tabpane" id="pane-contacts">
         <ul class="contacts" id="contact-list"></ul>
       </div>
     </div>
-
     <nav class="tabbar">
       <button class="tab active" data-tab="fav"><svg viewBox="0 0 24 24" class="ic"><path d="M12 17.3L6.2 21l1.6-6.6L3 9.9l6.7-.6L12 3l2.3 6.3 6.7.6-4.8 4.5 1.6 6.6z"/></svg><span>Favoriten</span></button>
       <button class="tab" data-tab="key"><svg viewBox="0 0 24 24" class="ic"><path d="M4 4h5v5H4zM10 4h5v5h-5zM16 4h5v5h-5zM4 10h5v5H4zM10 10h5v5h-5zM16 10h5v5h-5zM4 16h5v5H4zM10 16h5v5h-5zM16 16h5v5h-5z"/></svg><span>Keypad</span></button>
@@ -84,10 +71,10 @@
     </nav>
   </section>
 
-  <!-- ══════════════ screen: call ══════════════ -->
+  <!-- ══════════ Anruf: oben Charakter · Mitte Waveform · unten du ══════════ -->
   <section class="screen" id="screen-call">
 
-    <!-- upper half: HER side (camera off, voice only) -->
+    <!-- oben: Charakter-/App-Seite -->
     <div class="her" id="her">
       <div class="her-head">
         <div class="her-id">
@@ -97,43 +84,29 @@
             <p id="call-state">verbindet…</p>
           </div>
         </div>
-        <div class="call-timer" id="call-timer">00:00</div>
-      </div>
-
-      <div class="her-visual">
-        <div class="camoff">
-          <div class="camoff-ring" id="voice-ring"></div>
-          <svg viewBox="0 0 24 24" class="ic camoff-ic"><path d="M15 8.5l4-3.5v14l-4-3.5zM3 6h11v12H3z" opacity=".35"/><path d="M2.4 2.4l19.2 19.2-1.4 1.4L15 17.8V19H4a1 1 0 01-1-1V7.8L1 6.6 2.4 2.4z"/></svg>
-          <p>Kamera aus</p>
-          <small>sie sieht dein Video · du hörst ihre Stimme</small>
-        </div>
-        <div class="waves">
-          <div class="wgroup">
-            <small>DU · MIKRO-PEGEL</small>
-            <div class="wave you" id="wave-you"></div>
-          </div>
-          <div class="wgroup">
-            <small>SIE · STIMM-PEGEL</small>
-            <div class="wave her" id="wave-her"></div>
-            <div class="herprog" id="herprog"><i></i></div>
-          </div>
+        <div class="call-top-actions">
+          <button class="ghost-ic" id="btn-subs" data-on="true" aria-label="Untertitel">
+            <svg viewBox="0 0 24 24" class="ic"><path d="M4 4h16a1 1 0 011 1v14a1 1 0 01-1 1H4a1 1 0 01-1-1V5a1 1 0 011-1zm3 8v2h4v-2zm6 0v2h4v-2zm-6 4v2h10v-2z"/></svg>
+          </button>
+          <button class="ghost-ic" id="btn-panel" data-on="false" aria-label="Protokoll">
+            <svg viewBox="0 0 24 24" class="ic"><path d="M3 3h18v18H3zm2 2v14h14V5zm2 3h10v2H7zm0 4h10v2H7z"/></svg>
+          </button>
+          <div class="call-timer" id="call-timer">00:00</div>
         </div>
       </div>
-
-      <div class="subs">
+      <div class="her-sub-wrap">
         <div class="sub her-sub" id="sub-her">&nbsp;</div>
-        <div class="sub you-sub" id="sub-you">&nbsp;</div>
-      </div>
-
-      <div class="chips" id="call-chips">
-        <span class="chip" id="chip-vad">VAD …</span>
-        <span class="chip" id="chip-asr">ASR …</span>
-        <span class="chip" id="chip-vlm">VLM …</span>
-        <span class="chip" id="chip-pro">Initiative aus</span>
       </div>
     </div>
 
-    <!-- lower half: EXACTLY the frames handed to FastVLM -->
+    <!-- mitte: echte Audio-Waveform als Trennelement (oben = sie, unten = du) -->
+    <div class="wavewrap">
+      <span class="wavetag top">SIE</span>
+      <canvas id="waveform"></canvas>
+      <span class="wavetag bottom">DU</span>
+    </div>
+
+    <!-- unten: deine Seite -->
     <div class="mine" id="mine">
       <canvas id="modelview"></canvas>
       <div class="mv-hud">
@@ -142,20 +115,21 @@
         <span class="hud-tag" id="hud-size">– × –</span>
         <span class="hud-tag" id="hud-rate">– fps</span>
       </div>
-      <div class="mv-caption">exakt diese Pixel gehen an FastVLM &nbsp;·&nbsp; <button id="btn-freeze">Pause</button></div>
-      <div class="mv-crosshair"><span></span><span></span><span></span><span></span></div>
       <div class="mv-tools">
-        <button class="mvtool" id="btn-torch" data-on="false" aria-label="Taschenlampe" title="Taschenlampe">
-          <svg viewBox="0 0 24 24" class="ic"><path d="M7 2h10v3l-3 3v3l2 2v9H8v-9l2-2V8L7 5zm4 9v2h2v-2z"/><path d="M11 15h2v5h-2z" opacity=".5"/></svg>
+        <button class="mvtool" id="btn-torch" data-on="false" aria-label="Taschenlampe">
+          <svg viewBox="0 0 24 24" class="ic"><path d="M7 2h10v3l-3 3v3l2 2v9H8v-9l2-2V8L7 5z"/><path d="M11 15h2v5h-2z" opacity=".5"/></svg>
         </button>
-        <button class="mvtool" id="btn-flip" aria-label="Kamera wechseln" title="Kamera wechseln">
+        <button class="mvtool" id="btn-flip" aria-label="Kamera wechseln">
           <svg viewBox="0 0 24 24" class="ic"><path d="M12 5V2L7 6l5 4V7a5 5 0 015 5h2a7 7 0 00-7-7zm0 12a5 5 0 01-5-5H5a7 7 0 007 7v3l5-4-5-4z"/><path d="M3 6h4l2-2h6l2 2h4v12H3z" opacity=".35"/></svg>
         </button>
       </div>
+      <div class="mv-crosshair"><span></span><span></span><span></span><span></span></div>
+      <div class="you-sub-wrap"><div class="sub you-sub" id="sub-you">&nbsp;</div></div>
+      <div class="mv-caption">exakt diese Pixel sieht FastVLM &nbsp;·&nbsp; <button id="btn-freeze">Pause</button></div>
     </div>
 
     <div class="controls">
-      <button class="ctl" id="btn-mute" data-on="false">
+      <button class="ctl" id="btn-mute" data-on="true">
         <svg viewBox="0 0 24 24" class="ic"><path d="M12 14a3 3 0 003-3V5a3 3 0 10-6 0v6a3 3 0 003 3zm5-3a5 5 0 01-10 0H5a7 7 0 006 6.9V21h2v-3.1A7 7 0 0019 11z"/></svg>
         <span>Mikro</span>
       </button>
@@ -163,24 +137,23 @@
         <svg viewBox="0 0 24 24" class="ic"><path d="M15 8.5l4-3.5v14l-4-3.5zM3 6h11v12H3z"/></svg>
         <span>Kamera</span>
       </button>
-      <button class="ctl" id="btn-subs" data-on="true">
-        <svg viewBox="0 0 24 24" class="ic"><path d="M4 4h16a1 1 0 011 1v14a1 1 0 01-1 1H4a1 1 0 01-1-1V5a1 1 0 011-1zm3 8v2h4v-2zm6 0v2h4v-2zm-6 4v2h10v-2z"/></svg>
-        <span>Text</span>
-      </button>
-      <button class="ctl" id="btn-panel" data-on="false">
-        <svg viewBox="0 0 24 24" class="ic"><path d="M3 3h18v18H3zm2 2v14h14V5zm2 3h10v2H7zm0 4h10v2H7z"/></svg>
-        <span>Protokoll</span>
-      </button>
       <button class="ctl hangup" id="btn-hangup">
         <svg viewBox="0 0 24 24" class="ic"><path d="M12 9c-3 0-5.7.6-8 1.7V15l3.5-1.5V11c1.4-.5 2.9-.8 4.5-.8s3.1.3 4.5.8v2.5L20 15v-4.3C17.7 9.6 15 9 12 9z"/></svg>
         <span>Beenden</span>
       </button>
     </div>
 
-    <div class="transcript" id="transcript"></div>
+    <div class="transcript" id="transcript">
+      <div class="chips" id="call-chips">
+        <span class="chip" id="chip-vad">VAD …</span>
+        <span class="chip" id="chip-asr">ASR …</span>
+        <span class="chip" id="chip-vlm">VLM …</span>
+        <span class="chip" id="chip-pro">Initiative</span>
+      </div>
+    </div>
   </section>
 
-  <!-- ══════════════ ringing overlay ══════════════ -->
+  <!-- ══════════ Klingeln ══════════ -->
   <div class="overlay" id="ringing">
     <div class="ring-avatar" id="ring-avatar"><span>M</span></div>
     <h2 id="ring-name">Mara</h2>
@@ -193,7 +166,7 @@
     </div>
   </div>
 
-  <!-- ══════════════ settings sheet ══════════════ -->
+  <!-- ══════════ Einstellungen ══════════ -->
   <div class="sheet" id="settings">
     <div class="sheet-head">
       <h2>Einstellungen</h2>

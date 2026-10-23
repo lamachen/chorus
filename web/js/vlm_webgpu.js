@@ -39,6 +39,8 @@ async function loadTransformers() {
   for (const url of CDN) {
     try {
       _T = await import(/* @vite-ignore */ url);
+      // keine endlosen Retry-Stürme bei Netzabbruch/Block: schnell ehrlich scheitern
+      try { _T.env.maxRetry = 1; _T.env.retryDelay = 300; } catch {}
       return _T;
     } catch (e) { lastErr = e; }
   }
@@ -80,12 +82,32 @@ export class OnDeviceVLM {
     return 'wasm';
   }
 
+  /** Erreichbarkeit des Modell-CDNs VOR dem Load prüfen - sonst ehrlich sofort scheitern
+   *  statt in transformers.js' endloser Retry-Schleife zu hängen. */
+  async _preflight() {
+    if (this._preflightOk) return true;
+    const url = `https://huggingface.co/${this.model}/resolve/main/config.json`;
+    const ctl = new AbortController();
+    const to = setTimeout(() => ctl.abort(), 8000);
+    try {
+      const r = await fetch(url, { signal: ctl.signal, cache: 'force-cache' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      this._preflightOk = true;
+      return true;
+    } catch (e) {
+      throw new Error('Modell-CDN nicht erreichbar (offline oder blockiert) – On-Device-VLM nicht geladen');
+    } finally {
+      clearTimeout(to);
+    }
+  }
+
   async load(onProgress) {
     if (this.ready) return true;
     if (this.loading) return this._loadPromise;
     this.loading = true;
     this._loadPromise = (async () => {
       const t0 = performance.now();
+      await this._preflight();
       const T = await loadTransformers();
       onProgress && onProgress('Processor (Tokenizer + Bild-Vorverarbeitung)…', 0);
       this.processor = await T.AutoProcessor.from_pretrained(this.model, {
@@ -173,6 +195,9 @@ export class OnDeviceVLM {
   }
 
   cancel() { this.cancelled = true; }
+
+  /** Retry-Schleife von transformers.js sofort beenden (offline/Block). */
+  killSwitch() { if (this.T) { try { this.T.env.allowRemoteModels = false; } catch {} } }
 }
 
 /* Satz-Splitter für die TTS-Queue (Gegenstück zur serverseitigen Logik) */

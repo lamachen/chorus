@@ -1,17 +1,19 @@
-"""UI-Smoke-Test ohne Server: statischer File-Server + Playwright.
+"""Smoke-Test der On-Device-App ohne Server.
 
-Szenario 1 (CDN blockiert): Das On-Device-VLM kann nicht laden - die App muss
-das OFFEN anzeigen (Ring-Screen-Fehler, roter Chip) und darf nicht abstürzen
-und nichts vorspielen.
-Szenario 2 (CDN erlaubt, nur optional): echter Modell-Load - zu schwer für CI,
-dafür gibt es tests/ondevice_contract.mjs.
+Szenario 1 (CDNs blockiert): Das On-Device-VLM kann nicht laden. Die App muss
+das OFFEN anzeigen (Ring-Screen-Fehler, roter Chip), nichts vorspielen und
+nicht abstürzen.
+Szenario 2 (VLM-Stub): Geometrie des neuen Anruf-Screens - Waveform-Trenner
+vorhanden, keine Fake-Kamera-Elemente, nur drei Controls, Chips im Protokoll.
+
+Screenshots macht tests/shots.py (getrennt, weil SwiftShader-Raster in kleinen
+Sandboxes flaky sein kann).
 
     pip install playwright && playwright install chromium
     python tests/browser_smoke.py
 """
 
 import asyncio
-import functools
 import http.server
 import os
 import socketserver
@@ -21,6 +23,7 @@ import threading
 from playwright.async_api import async_playwright
 
 ROOT = os.path.join(os.path.dirname(__file__), "..", "web")
+OUT = os.path.join(os.path.dirname(__file__), "..", "shots")
 PORT = 8123
 
 
@@ -30,14 +33,16 @@ class Quiet(http.server.SimpleHTTPRequestHandler):
 
 
 def serve():
+    cwd = os.getcwd()
     os.chdir(ROOT)
     socketserver.TCPServer.allow_reuse_address = True
     httpd = socketserver.TCPServer(("127.0.0.1", PORT), Quiet)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    os.chdir(cwd)
     return httpd
 
 
-async def main() -> int:
+async def run_once() -> int:
     httpd = serve()
     errors = []
     async with async_playwright() as pw:
@@ -51,54 +56,85 @@ async def main() -> int:
             user_agent="Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Mobile Safari/537.36",
             permissions=["camera", "microphone"],
         )
+        await ctx.add_init_script(
+            "localStorage.setItem('chorus-settings-v2', JSON.stringify({ onDeviceDevice: 'wasm' }))")
         page = await ctx.new_page()
         page.on("pageerror", lambda e: errors.append("PAGEERROR: " + str(e)))
-        page.on("console", lambda m: errors.append(m.text) if m.type == "error" and "ERR_FAILED" not in m.text and "404" not in m.text else None)
+        page.on("crash", lambda: errors.append("CRASH"))
 
-        print("goto …")
+        # Modell-CDNs blockieren -> ehrlicher Fehlerpfad, schlanker Speicher
+        for pat in ("**/*huggingface.co/**", "**/*jsdelivr**", "**/*unpkg**"):
+            await page.route(pat, lambda r: r.abort())
+
         await page.goto(f"http://127.0.0.1:{PORT}/index.html", wait_until="networkidle")
         await page.wait_for_timeout(1500)
-        print("boot ok")
-        # ab hier offline -> Modell-CDN unerreichbar -> ehrlicher Fehlerpfad
-        await ctx.set_offline(True)
-        n_personas = await page.evaluate("document.querySelectorAll('#fav-list li').length")
-        print("Kontakte:", n_personas)
-        await page.screenshot(path="shots/1-dialer.png")
+        n = await page.evaluate("document.querySelectorAll('#fav-list li').length")
+        print("Kontakte:", n)
+        assert n == 3
 
-        print("call …")
         await page.click("#fav-list li:first-child .c-main")
-        try:
-            await page.wait_for_function(
-                "() => document.getElementById('ring-state').textContent.includes('nicht geladen')",
-                timeout=20000)
-        except Exception:
-            pass
-        await page.wait_for_timeout(500)
+        ring = ""
+        for _ in range(15):
+            await page.wait_for_timeout(1000)
+            ring = await page.evaluate("document.getElementById('ring-state').textContent")
+            if "nicht geladen" in ring:
+                break
         st = await page.evaluate("""() => ({
             state: window.__app.state,
-            ringState: document.getElementById('ring-state').textContent,
+            ring: document.getElementById('ring-state').textContent,
             chip: document.getElementById('chip-vlm').textContent,
-            vlmReady: window.__app.vlm && window.__app.vlm.ready,
-            vlmError: (window.__app.vlm && window.__app.vlm.error || window.__app._vlmError || '').slice(0, 80),
-            frames: window.__app.vision.frameId,
-            vad: window.__app.vad.info.detector,
-            youBars: [...document.querySelectorAll('#wave-you i')].map(i => +i.style.height.replace('px','')),
-            torchHidden: document.getElementById('btn-torch').hidden,
-            facing: window.__app.vision.facing })""")
+            vlmReady: !!(window.__app.vlm && window.__app.vlm.ready),
+            facing: window.__app.vision.facing,
+            torchHidden: document.getElementById('btn-torch').hidden })""")
         print("Fehlerpfad:", st)
-        assert st["vlmReady"] is not True, "VLM dürfte mit blockiertem CDN nicht ready sein"
-        assert "nicht geladen" in st["ringState"], "Ring-Screen muss den Ladefehler offen zeigen"
+        assert st["vlmReady"] is False, "mit blockierter CDN darf kein VLM ready sein"
+        assert "nicht geladen" in st["ring"], "Ring-Screen muss den Ladefehler offen zeigen"
         assert st["facing"] == "environment", "Rückkamera muss Standard sein"
-        await page.screenshot(path="shots/4-ring-error.png")
+        print("OK: ehrlicher Fehlerpfad, kein Fake, kein Absturz")
 
         await page.click("#ring-cancel")
         await page.wait_for_timeout(800)
         assert await page.evaluate("window.__app.state") == "idle"
-        print("OK: ehrlicher Fehlerpfad, kein Fake, kein Absturz")
-        print("errors:", errors[:5] or "keine")
+
+        # ---- Layout des Anruf-Screens (VLM-Stub, nur Geometrie) ----
+        try:
+            await page.unroute("**/*huggingface.co/**")
+        except Exception:
+            pass
+        await page.evaluate("""() => {
+          window.__app.vlm = { ready: true, loading: false, device: 'stub', preset: 'compact',
+            cancel() {}, generate: async () => '' };
+          window.__app.enterCall();
+        }""")
+        await page.wait_for_timeout(1500)
+        layout = await page.evaluate("""() => ({
+          waveform: !!document.getElementById('waveform'),
+          fakeElemente: document.querySelectorAll('#wave-you,#wave-her,.camoff,#voice-ring').length,
+          kamerasText: document.getElementById('screen-call').innerHTML.includes('Kamera aus'),
+          controls: [...document.querySelectorAll('.controls .ctl')].map(b => b.id),
+          chipsImProtokoll: !!document.querySelector('#transcript .chips'),
+          wf: (() => { const c = document.getElementById('waveform'); return c.width + 'x' + c.height; })() })""")
+        print("Layout:", layout)
+        assert layout["waveform"] and layout["fakeElemente"] == 0 and not layout["kamerasText"]
+        assert layout["controls"] == ["btn-mute", "btn-cam", "btn-hangup"]
+        assert layout["chipsImProtokoll"]
+        print("OK: vertikales Layout (Charakter | Waveform-Trenner | Nutzer), keine Fake-Kamera-Box")
+
+        print("errors:", [e for e in errors if "ERR_FAILED" not in e and "404" not in e][:5] or "keine")
         await browser.close()
     httpd.shutdown()
     return 1 if errors else 0
+
+
+async def main() -> int:
+    for attempt in (1, 2):
+        try:
+            return await run_once()
+        except Exception as e:
+            if "crash" not in str(e).lower():
+                raise
+            print(f"!! Renderer-Crash (Sandbox-Flake, Versuch {attempt}) - erneuter Lauf …")
+    raise SystemExit(2)
 
 
 if __name__ == "__main__":

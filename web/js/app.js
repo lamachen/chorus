@@ -28,7 +28,7 @@ const DEFAULTS = {
   frameSize: 768, ratio: '1:1', intervalMs: 1100, quality: 0.8,
   previewMode: 'exact', pixelExact: false, cameraFacing: 'environment', mirrorMode: 'auto',
   proactive: true, activationThreshold: 0.62, activationCooldown: 22, subtitles: true,
-  onDevicePreset: 'compact', turbo: false,
+  onDevicePreset: 'compact', onDeviceDevice: 'auto', turbo: false,
 };
 
 const load = () => { try { return { ...DEFAULTS, ...(JSON.parse(localStorage.getItem(KEY)) || {}) }; } catch { return { ...DEFAULTS }; } };
@@ -94,13 +94,14 @@ class App {
   /* ================= Boot ================= */
   async boot() {
     UI.startClock(UI.$('sb-time'));
-    this.buildWaves();
+    window.addEventListener('resize', () => { if (this.state === 'in-call') this.setupWaveform(); });
     this.applyPersisted();
     this.wireStatic();
     this.buildSettingsSchema();
     this.checkSecureContext();
-    fetch('build_info.json').then(r => r.ok ? r.json() : null).then(j => { this.buildInfo = j; }).catch(() => {});
+    fetch('build_info.json').then(r => r.ok ? r.json() : null).then(j => { this.buildInfo = j; this.renderInfo(); }).catch(() => {});
     this.probeOnDeviceInfo();
+    this.preloadVlm();
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('sw.js').then((reg) => {
         reg.addEventListener('updatefound', () => {
@@ -115,6 +116,30 @@ class App {
 
   probeOnDeviceInfo() { this.onDevice = onDeviceSupported(); this.renderInfo(); }
 
+  /** On-Device-VLM sofort beim Seitenstart laden - kein Button, kein Dialog. */
+  preloadVlm() {
+    this.vlm = this.vlm || new OnDeviceVLM({ preset: this.s.onDevicePreset, device: this.s.onDeviceDevice || 'auto' });
+    const label = (txt, cls) => {
+      UI.$('engine-label').textContent = txt;
+      UI.$('engine-dot').className = 'dot ' + cls;
+    };
+    if (this.vlm.ready) { label('VLM bereit', 'ok'); return; }
+    label('VLM lädt…', 'load');
+    this.vlm.load((msg, p) => {
+      label(`VLM ${(p * 100) | 0}% · ${String(msg).slice(0, 26)}`, 'load');
+      this._vlmProg = msg;
+      this._vlmP = p || 0;
+    }).then(() => {
+      label(`VLM bereit · ${this.vlm.device}`, 'ok');
+      this.setChip('chip-vlm', `VLM ${this.vlm.device} · ${this.vlm.preset}`, true);
+      this.renderInfo();
+    }).catch((e) => {
+      this._vlmError = String(e && e.message || e);
+      label('VLM Fehler', 'err');
+      this.renderInfo();
+    });
+  }
+
   checkSecureContext() {
     if (window.isSecureContext || ['localhost', '127.0.0.1'].includes(location.hostname)) return;
     const gate = UI.el('div', 'gate');
@@ -125,9 +150,38 @@ class App {
     document.getElementById('phone').appendChild(gate);
   }
 
-  buildWaves() {
-    const mk = (id, n) => { const w = UI.$(id); w.innerHTML = ''; for (let i = 0; i < n; i++) w.appendChild(UI.el('i')); };
-    mk('wave-you', 10); mk('wave-her', 14);
+  setupWaveform() {
+    const c = UI.$('waveform');
+    if (!c) return;
+    const dpr = Math.min(1.5, window.devicePixelRatio || 1);
+    c.width = Math.max(1, Math.round(c.clientWidth * dpr));
+    c.height = Math.max(1, Math.round(c.clientHeight * dpr));
+    this._wf = c;
+    this.micHist = new Array(64).fill(0);
+    this.herHist = new Array(64).fill(0);
+  }
+
+  /** gespiegelte Echtzeit-Waveform: oben = ihre TTS-Hüllkurve, unten = dein Mikro-RMS */
+  drawWave() {
+    const c = this._wf;
+    if (!c || !c.width) return;
+    const ctx = c.getContext('2d');
+    const w = c.width, h = c.height, mid = h / 2;
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = 'rgba(255,255,255,.16)';
+    ctx.fillRect(0, mid - 1, w, 1.5);
+    const n = this.micHist.length, bw = w / n;
+    const hue = this.persona?.hue ?? 326;
+    for (let i = 0; i < n; i++) {
+      const mv = Math.min(1, (this.micHist[i] || 0) * 9);
+      const hv = Math.min(1, this.herHist[i] || 0);
+      const mh = Math.pow(mv, 0.7) * (mid - 6);
+      const hh = hv * (mid - 6);
+      ctx.fillStyle = mv < 0.004 ? 'rgba(59,157,255,.28)' : 'rgba(59,157,255,.95)';
+      ctx.fillRect(i * bw + 1, mid + 1, bw - 2, Math.max(1, mh));
+      ctx.fillStyle = `hsl(${hue} 85% 66% / ${0.35 + hv * 0.65})`;
+      ctx.fillRect(i * bw + 1, mid - 1 - Math.max(1, hh), bw - 2, Math.max(1, hh));
+    }
   }
 
   /* ================= statische UI ================= */
@@ -162,7 +216,7 @@ class App {
     });
     UI.$('btn-subs').onclick = (e) => this.toggle(e.currentTarget, (on) => {
       this.s.subtitles = on; this.save();
-      document.querySelector('.subs').style.display = on ? '' : 'none';
+      this.setSubsVisible(on);
     });
     UI.$('btn-panel').onclick = (e) => this.toggle(e.currentTarget, (on) => {
       UI.$('transcript').classList.toggle('on', on);
@@ -210,7 +264,7 @@ class App {
     UI.$('ring-avatar').innerHTML = `<span>${this.persona.name[0]}</span>`;
     UI.$('ring-state').textContent = 'FaceTime-Video · klingelt…';
     UI.$('call-state').textContent = 'verbindet…';
-    UI.$('transcript').innerHTML = '';
+    UI.$('transcript').querySelectorAll('.msg').forEach(m => m.remove());
     this.ring.start();
     UI.$('ringing').classList.add('on');
     UI.keepAwake(true);
@@ -231,19 +285,21 @@ class App {
       }
     })();
 
-    // On-Device-VLM: sofort, ohne Rückfrage, mit ehrlichem Fortschritt
-    this.vlm = this.vlm && (this.vlm.loading || this.vlm.ready) ? this.vlm : new OnDeviceVLM({ preset: this.s.onDevicePreset });
+    // On-Device-VLM: läuft i. d. R. schon seit dem Seitenstart; sonst jetzt starten
+    this.vlm = this.vlm || new OnDeviceVLM({ preset: this.s.onDevicePreset, device: this.s.onDeviceDevice || 'auto' });
     const prog = (msg, p) => {
       UI.$('ring-state').textContent = 'FastVLM lädt · ' + msg;
       const bar = UI.$('ring-prog');
       if (bar) bar.style.width = Math.round((p || 0) * 100) + '%';
       this._vlmProg = msg;
+      this._vlmP = p || 0;
       this.renderInfo();
     };
     prog('Tokenizer + Vorverarbeitung…', 0);
 
     const failLoad = (msg) => {
       this._vlmError = msg;
+      try { this.vlm && this.vlm.killSwitch(); } catch {}
       UI.$('ring-state').textContent = 'FastVLM konnte nicht geladen werden';
       const bar = UI.$('ring-prog'); if (bar) bar.style.width = '0%';
       UI.toast('On-Device-VLM: ' + msg, 6000);
@@ -252,12 +308,13 @@ class App {
       clearInterval(this._stall);
     };
     this._vlmError = null;
-    let lastMsg = '', lastMove = Date.now();
+    let maxP = -1, lastMove = Date.now();
     clearInterval(this._stall);
     this._stall = setInterval(() => {
       if (!this.vlm || this.vlm.ready || this.state === 'idle') { clearInterval(this._stall); return; }
-      if (this._vlmProg !== lastMsg) { lastMsg = this._vlmProg || ''; lastMove = Date.now(); }
-      else if (Date.now() - lastMove > 15000) {
+      const p = this._vlmP || 0;
+      if (p > maxP) { maxP = p; lastMove = Date.now(); }
+      else if (Date.now() - lastMove > 12000) {
         failLoad('Ladung bleibt hängen – offline oder CDN blockiert?');
       }
     }, 1000);
@@ -285,6 +342,7 @@ class App {
     if (this.s.handsFree && this.asr.supported) this.asr.start();
     else this.setChip('chip-asr', 'ASR nicht verfügbar', false, true);
     this.addSys(`verbunden · FastVLM-0.5B on-device (${this.vlm.device})`);
+    this.setupWaveform();
     this.renderAudio();
     clearInterval(this._actTimer);
     this._actTimer = setInterval(() => this.proactiveTick(), 2500);
@@ -460,37 +518,24 @@ class App {
     this.setChip('chip-asr', `ASR ${this.asr.wantRunning ? (this.asr.pausedForTTS ? 'wartet' : 'läuft') : 'aus'} · Mic ${(p * 100) | 0}%`, p > 0.4);
   }
 
-  /* ================= echte Pegel ================= */
+  /* ================= echte Pegel -> Waveform ================= */
   renderAudio() {
     cancelAnimationFrame(this._rafId);
     const loop = () => {
       this._rafId = requestAnimationFrame(loop);
       if (this.state !== 'in-call') return;
       const now = performance.now();
+      this._wfTick = (this._wfTick || 0) + 1;
+      const draw = this._wfTick % 2 === 0;
 
       const lvl = this.vad?.running ? this.vad.level : 0;
-      this._micHist = (this._micHist || []).concat(lvl).slice(-10);
-      const yb = UI.$('wave-you').children;
-      for (let i = 0; i < yb.length; i++) {
-        const v = this._micHist[this._micHist.length - yb.length + i] || 0;
-        yb[i].style.height = Math.max(2, Math.min(30, Math.pow(Math.min(1, v * 9), 0.7) * 30)) + 'px';
-        yb[i].classList.toggle('idle', v < 0.004);
-      }
-
+      this.micHist = (this.micHist || []).concat(lvl).slice(-64);
       if (this.tts.speaking && !this._boundCount) this.herEnv = Math.max(this.herEnv || 0, 0.3);
       this.herEnv = (this.herEnv || 0) * 0.90;
-      const hb = UI.$('wave-her').children;
-      const shape = [0.45, 0.7, 1, 0.8, 0.6, 0.9, 1, 0.75, 0.55, 0.85, 0.95, 0.65, 0.5, 0.4];
-      for (let i = 0; i < hb.length; i++) {
-        hb[i].style.height = Math.max(2, Math.min(30, (this.herEnv || 0) * 30 * shape[i])) + 'px';
-        hb[i].classList.toggle('idle', (this.herEnv || 0) < 0.03);
-      }
-      const ring = UI.$('voice-ring');
-      if (ring) { ring.style.opacity = Math.min(0.85, (this.herEnv || 0) * 0.9); ring.style.transform = `scale(${0.6 + (this.herEnv || 0) * 0.5})`; }
-      const prog = UI.$('herprog').firstElementChild;
-      if (prog) prog.style.width = (this.tts.speaking && this._sentEst ? Math.min(1, (now - this._sentStart) / this._sentEst) * 100 : 0).toFixed(1) + '%';
+      this.herHist = (this.herHist || []).concat(this.herEnv || 0).slice(-64);
+      if (draw) this.drawWave();
 
-      // Barge-in-Kanal 2: echter Pegel-Spike über dem adaptiven Noisefloor
+      // Barge-in-Kanal 2: echter Pegel-Spike ueber dem adaptiven Noisefloor
       if (this.tts.speaking && this.s.bargeIn && this.vad?.running) {
         const floor = this.vad.noiseFloor || 0.012;
         if (lvl > Math.max(0.05, floor * 6)) this._spikeMs = (this._spikeMs || 0) + 16; else this._spikeMs = 0;
@@ -513,9 +558,7 @@ class App {
       this.renderInfo();
     }
     this._boundCount = 0;
-    this._sentStart = performance.now();
-    this._sentEst = 600 + ((text || '').length / Math.max(0.4, this.tts.rate)) * 62;
-    this.herEnv = 0.7;
+    this.herEnv = 0.9;
     UI.$('her').classList.add('speaking');
     UI.$('her').classList.remove('listening');
     this.vad.setSheSpeaks(true);
@@ -524,8 +567,6 @@ class App {
   }
   onTtsEnd() {
     this.herEnv = 0;
-    const prog = UI.$('herprog') && UI.$('herprog').firstElementChild;
-    if (prog) prog.style.width = '0%';
     UI.$('her').classList.remove('speaking');
     this.vad.setSheSpeaks(false);
     if (this.s.halfDuplex) this.asr.setPausedForTTS(false);
@@ -545,8 +586,17 @@ class App {
   }
   addSys(text) { UI.$('transcript').appendChild(UI.el('div', 'msg sys', text)); }
   scrollTranscript() { const b = UI.$('transcript'); b.scrollTop = b.scrollHeight; }
-  subHer(t) { if (!this.s.subtitles) return; const n = UI.$('sub-her'); n.textContent = t || '\u00a0'; }
-  subYou(t) { const n = UI.$('sub-you'); n.textContent = t ? '🎙 ' + t : '\u00a0'; }
+  subHer(t) {
+    if (!this.s.subtitles) return;
+    const n = UI.$('sub-her');
+    n.textContent = t || '\u00a0';
+    n.classList.toggle('blank', !t);
+  }
+  subYou(t) {
+    const n = UI.$('sub-you');
+    n.textContent = t ? '🎙 ' + t : '\u00a0';
+    n.classList.toggle('blank', !t);
+  }
   setChip(id, text, hot = false, warn = false) {
     const c = UI.$(id);
     if (!c) return;
@@ -565,13 +615,19 @@ class App {
     UI.$('hud-rate').textContent = `${st.fps.toFixed(2)} fps → VLM`;
     const tb = UI.$('btn-torch');
     if (tb) { tb.hidden = !st.hasTorch; tb.dataset.on = String(st.torch); }
-    UI.$('chip-vlm').title = `Kamera ${st.src} · ${st.facing} · ${st.mirror ? 'gespiegelt' : 'ungespiegelt'} · torch ${st.torch ? 'an' : 'aus'}`;
+    const cv = UI.$('chip-vlm');
+    if (cv) cv.title = `Kamera ${st.src} · ${st.facing} · ${st.mirror ? 'gespiegelt' : 'ungespiegelt'} · torch ${st.torch ? 'an' : 'aus'}`;
   }
 
   /* ================= Settings ================= */
   save() { localStorage.setItem(KEY, JSON.stringify(this.s)); }
+  setSubsVisible(v) {
+    const a = document.querySelector('.her-sub-wrap'), b = document.querySelector('.you-sub-wrap');
+    if (a) a.style.display = v ? '' : 'none';
+    if (b) b.style.display = v ? '' : 'none';
+  }
   applyPersisted() {
-    document.querySelector('.subs').style.display = this.s.subtitles ? '' : 'none';
+    this.setSubsVisible(this.s.subtitles);
     UI.$('btn-subs').dataset.on = String(this.s.subtitles);
     UI.$('modelview').classList.toggle('nosmooth', this.s.pixelExact);
     this.tts.rate = this.s.rate; this.tts.pitch = this.s.pitch; this.tts.volume = this.s.volume;
@@ -614,6 +670,8 @@ class App {
       { type: 'select', key: 'onDevicePreset', label: 'Modellgröße', options: [
         { value: 'compact', label: 'compact ≈ 676 MB' }, { value: 'balanced', label: 'balanced ≈ 812 MB' },
         { value: 'apple', label: 'apple-Mix ≈ 1,1 GB' }, { value: 'fp16', label: 'fp16 ≈ 1,5 GB' }] },
+      { type: 'select', key: 'onDeviceDevice', label: 'Inferenz-Gerät', options: [
+        { value: 'auto', label: 'auto (WebGPU, sonst WASM)' }, { value: 'webgpu', label: 'WebGPU erzwingen' }, { value: 'wasm', label: 'WASM/CPU erzwingen' }] },
       { type: 'switch', key: 'turbo', label: 'Turbo (minimale Latenz)', desc: '48 statt 96 Tokens, max. 2 Sätze. Gilt ab dem nächsten Anruf.' },
       { type: 'info', key: 'vlm', rows: [['Status', '–']] },
       { type: 'info', key: 'perf', rows: [['TTFA', '–']] },
@@ -640,7 +698,7 @@ class App {
       case 'vadOnset': this.vad.tune({ onset: v, offset: Math.max(0.15, v - 0.2) }); break;
       case 'vadHangover': this.vad.tune({ hangoverMs: v }); break;
       case 'handsFree': v ? (this.asr.supported && this.asr.start()) : this.asr.stop(); break;
-      case 'subtitles': document.querySelector('.subs').style.display = v ? '' : 'none'; break;
+      case 'subtitles': this.setSubsVisible(v); break;
       case 'pixelExact': UI.$('modelview').classList.toggle('nosmooth', v); break;
       case 'mirrorMode': this.vision.setMirrorMode(v); break;
       case 'cameraFacing': this.vision.facing = v; this.vision.restart().then(() => { UI.$('btn-torch').hidden = !this.vision.hasTorch; }); break;
@@ -656,12 +714,12 @@ class App {
   onVoices(list) { this._voices = list; this.refreshVoiceOptions(); }
   refreshVoiceOptions() {
     if (!this._voices) return;
-    const item = this._schema.find(x => x.key === 'voiceURI');
-    if (!item) return;
-    item.options = [{ value: '', label: 'automatisch (weiblich)' }].concat(
+    const sel = document.getElementById('set-voiceURI');
+    if (!sel) return;
+    const opts = [{ value: '', label: 'automatisch (weiblich)' }].concat(
       rankVoices(this._voices, this.s.lang).slice(0, 40).map(v => ({ value: v.voiceURI, label: `${v.name} · ${v.lang}${v.localService ? '' : ' · cloud'}` })));
-    UI.buildSettings(UI.$('settings-body'), this._schema, this.s, (k, v, i) => this.onSetting(k, v, i));
-    this.renderInfo();
+    sel.innerHTML = '';
+    opts.forEach((o) => { const op = UI.el('option', null, o.label); op.value = o.value; if (o.value === (this.s.voiceURI || '')) op.selected = true; sel.appendChild(op); });
   }
 
   renderInfo() {

@@ -1,7 +1,7 @@
 {
- "ts": "2026-10-23T03:35:08Z",
- "stamp": "20261023033508",
- "note": "Purge: Server/Mock/Regel-Charakter/Demo-Modus/geskriptete Antworten/Fakes komplett entfernt. Rein on-device: FastVLM-ONNX laedt sofort beim Antippen (Fortschritt im Ring-Screen), Begruessung frei generiert, ehrlicher Fehlerpfad statt Fallbacks. Silero als einzige VAD. Anzeige = exakte VLM-Pixel ohne JPEG-Roundtrip.",
+ "ts": "2026-10-23T04:17:54Z",
+ "stamp": "20261023041754",
+ "note": "Purge-Finish: vertikales 3-Zonen-Layout (Charakter | echte gespiegelte Waveform als Trenner | Nutzer-Frames), keine Fake-Kamera-Box, 3 Controls, Chips ins Protokoll; VLM-Preload beim Seitenstart (kein Button/Dialog); Settings-Rebuild-Bug fix (tote Buttons); SW fasst keine Cross-Origin-Fetches mehr an; Preflight statt Retry-Sturm; Silero als einzige VAD",
  "app": "CHORUS · FastVLM Live-Vision-Sprachchat",
  "pages": "https://lamachen.github.io/chorus/web/index.html"
 }
