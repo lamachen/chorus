@@ -103,6 +103,7 @@ class CallSession:
         self.closed = False
         self._pending_meta: dict = {}
         self.pending_notes: list[str] = []
+        self.turbo = False
         self._scene_lock = asyncio.Lock()
         self._last_scene_run = 0.0
         self._last_compression = 0.0
@@ -177,6 +178,7 @@ class CallSession:
                 "city": self.persona.city, "hue": self.persona.hue,
                 "voice": {"lang": self.persona.voice_lang, "pitch": self.persona.voice_pitch,
                           "rate": self.persona.voice_rate, "names": self.persona.voice_names},
+                "greetings": self.persona.greetings,
             },
             "personas": [
                 {"id": p.pid, "name": p.name, "age": p.age, "city": p.city, "tagline": p.tagline, "hue": p.hue}
@@ -225,6 +227,8 @@ class CallSession:
         for key, attr in (("activation_threshold", "threshold"), ("activation_cooldown", "cooldown")):
             if msg.get(key) is not None:
                 setattr(self.activation, attr, float(msg[key]))
+        if msg.get("turbo") is not None:
+            self.turbo = bool(msg["turbo"])
 
     # ------------------------------------------------------------------
     # vision
@@ -462,8 +466,10 @@ class CallSession:
                             max_tokens=settings.llm_max_tokens, temperature=settings.temperature)
             if use_llm else
             self.engines.stream(system=system, history=history, user_text=prompt_user,
-                                image=image, max_tokens=settings.max_tokens,
-                                temperature=settings.temperature, top_p=settings.top_p,
+                                image=image,
+                                max_tokens=70 if self.turbo else settings.max_tokens,
+                                temperature=0.0 if self.turbo else settings.temperature,
+                                top_p=settings.top_p,
                                 cancel=self.cancel_evt)
         )
 
@@ -483,7 +489,8 @@ class CallSession:
                     spoken.append(clean)
                     sent_sentences += 1
                     await self.send({"t": "sentence", "text": clean, "i": sent_sentences})
-                    if sent_sentences >= 3 and sum(len(s) for s in spoken) > 90:
+                    cap = 2 if self.turbo else 3
+                    if sent_sentences >= cap and sum(len(s) for s in spoken) > 90:
                         # enough for one spoken breath; drain the rest silently
                         self.cancel_evt.set()
                         break

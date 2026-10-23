@@ -12,6 +12,7 @@
 import { MicVad } from './vad.js';
 import { SystemTTS, SystemASR, rankVoices } from './speech.js';
 import { Vision } from './vision.js';
+import { LocalEngine, probeOnDevice, DEFAULT_PERSONAS } from './local_engine.js';
 import * as UI from './ui.js';
 
 const KEY = 'fastvlm-call-settings-v1';
@@ -54,6 +55,12 @@ class App {
     this.herBubble = null;
     this.ring = new UI.RingTone();
     this.lastTurnMs = null;
+    this.localMode = false;
+    this.local = null;
+    this.perf = { ttft: [], ttfa: [] };
+    this.commitAt = 0;
+    this.onDevice = null;
+    this.buildInfo = null;
     this.tts = new SystemTTS({
       onVoices: (v) => this.onVoices(v),
       onStart: () => this.onTtsStart(),
@@ -100,7 +107,9 @@ class App {
     this.wireStatic();
     this.buildSettingsSchema();
     await this.refreshStatus();
-    setInterval(() => this.state === 'idle' && this.refreshStatus(), 6000);
+    setInterval(() => this.state === 'idle' && !this.localMode && this.refreshStatus(), 6000);
+    probeOnDevice().then((d) => { this.onDevice = d; this.renderEngineInfo(); });
+    fetch('build_info.json').then(r => r.ok ? r.json() : null).then(j => { this.buildInfo = j; }).catch(() => {});
     this.checkSecureContext();
     if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
   }
@@ -137,8 +146,9 @@ class App {
         if (this._schema) this.buildSettingsSchema();
       }
     } catch (err) {
-      UI.$('engine-label').textContent = 'Server offline';
+      UI.$('engine-label').textContent = 'offline · Demo bereit';
       UI.$('engine-dot').className = 'dot err';
+      if (!this.personas.length) { this.personas = DEFAULT_PERSONAS; this.renderLists(); }
     }
   }
 
@@ -278,17 +288,22 @@ class App {
     this.ws = ws;
     ws.onopen = () => {
       this.setChip('chip-vlm', 'VLM verbunden', true);
-      ws.send(JSON.stringify({
+      this.sendObj({
         t: 'hello', persona: this.persona.id, lang: this.s.lang.slice(0, 2),
         proactive: this.s.proactive, activation_mode: this.s.activationMode,
         activation_threshold: this.s.activationThreshold,
-      }));
+      });
     };
-    ws.onmessage = (ev) => this.onWs(ev.data);
-    ws.onerror = () => this.setChip('chip-vlm', 'VLM Fehler', false, true);
+    ws.onmessage = (ev) => this.dispatch(ev.data);
+    ws.onerror = () => {
+      this.setChip('chip-vlm', 'VLM Fehler', false, true);
+      if (!this.localMode && (this.state === 'dialing' || this.state === 'in-call')) this.startLocal('Server nicht erreichbar');
+    };
     ws.onclose = () => {
       this.setChip('chip-vlm', 'VLM getrennt', false, true);
-      if (this.state === 'in-call') { UI.toast('Verbindung zum Server beendet'); this.hangup(true); }
+      if (this.localMode) return;
+      if (this.state === 'dialing') this.startLocal('Server nicht erreichbar');
+      else if (this.state === 'in-call') { UI.toast('Verbindung zum Server beendet'); this.hangup(true); }
     };
   }
 
@@ -341,7 +356,7 @@ class App {
     this.vad.stop();
     this.vision.stop();
     UI.keepAwake(false);
-    try { this.ws && this.ws.send(JSON.stringify({ t: 'bye' })); } catch {}
+    try { this.sendObj({ t: 'bye' }); } catch {}
     try { this.ws && this.ws.close(); } catch {}
     this.ws = null;
     UI.$('ringing').classList.remove('on');
@@ -356,9 +371,35 @@ class App {
     this.refreshStatus();
   }
 
-  /* ================= websocket ================= */
-  onWs(raw) {
-    let m; try { m = JSON.parse(raw); } catch { return; }
+  /* ================= transport ================= */
+  sendObj(o) {
+    if (this.localMode) { this.local && this.local.post(o); return true; }
+    if (this.ws && this.ws.readyState === 1) { this.ws.send(JSON.stringify(o)); return true; }
+    return false;
+  }
+
+  startLocal(reason) {
+    if (this.localMode) return;
+    this.localMode = true;
+    try { this.ws && this.ws.close(); } catch {}
+    this.ws = null;
+    const base = DEFAULT_PERSONAS.find(x => x.id === (this.persona?.id || 'mara')) || DEFAULT_PERSONAS[0];
+    this.local = new LocalEngine(this, { ...base, ...(this.persona || {}) });
+    UI.toast(reason + ' → On-Device-Demomodus (ohne Server)');
+    this.setChip('chip-vlm', 'VLM on-device', true);
+    this.local.post({ t: 'hello', persona: base.id, lang: this.s.lang.slice(0, 2) });
+    if (this.state === 'dialing') this.connectNow();
+  }
+
+  dispatch(raw) {
+    let m = raw;
+    if (typeof raw === 'string') { try { m = JSON.parse(raw); } catch { return; } }
+    this.onMsg(m);
+  }
+
+  onWs(raw) { this.dispatch(raw); }
+
+  onMsg(m) {
     switch (m.t) {
       case 'welcome':
         this.sid = m.sid; break;
@@ -419,7 +460,9 @@ class App {
       case 'probe_vote':
         break;
       case 'ttft_ms':
+        this.perf.ttft.push(m.ms); this.perf.ttft = this.perf.ttft.slice(-12);
         this.setChip('chip-vlm', `VLM TTFT ${Math.round(m.ms)} ms`, true);
+        this.renderEngineInfo();
         break;
       case 'error':
         UI.toast('Server: ' + m.message, 4500);
@@ -436,6 +479,7 @@ class App {
   }
 
   sendFrame(id, buf, meta) {
+    if (this.localMode) { this.local && this.local.observe(); return; }
     if (!this.ws || this.ws.readyState !== 1) return;
     try {
       this.ws.send(JSON.stringify({ t: 'frame_meta', id, ts: meta.ts, w: meta.w, h: meta.h, bytes: meta.bytes }));
@@ -443,9 +487,7 @@ class App {
     } catch (e) { /* drop frame */ }
   }
 
-  note(text) {
-    if (this.ws?.readyState === 1) this.ws.send(JSON.stringify({ t: 'note', text }));
-  }
+  note(text) { this.sendObj({ t: 'note', text }); }
 
   onVisionStats(st) {
     UI.$('hud-frame').textContent = `frame #${st.id}`;
@@ -465,10 +507,11 @@ class App {
 
   onSpeechStart() {
     if (this.state !== 'in-call') return;
+    this.sendObj({ t: 'vad', speaking: true });
     UI.$('her').classList.add('listening');
     if (this.tts.speaking && this.s.bargeIn) {
       this.tts.cancel();
-      this.ws?.readyState === 1 && this.ws.send(JSON.stringify({ t: 'interrupt', reason: 'barge-in' }));
+      this.sendObj({ t: 'interrupt', reason: 'barge-in' });
       this.addSys('du hast sie unterbrochen');
       if (this.s.halfDuplex) this.asr.setPausedForTTS(false);
     }
@@ -476,6 +519,7 @@ class App {
   }
 
   onSpeechEnd(e) {
+    this.sendObj({ t: 'vad', speaking: false });
     UI.$('her').classList.remove('listening');
     if (e.tooShort) return;
     this.scheduleCommit(560);
@@ -505,12 +549,20 @@ class App {
     this.addMsg('you', 'Du', text);
     this.subYou('');
     this.scrollTranscript();
-    if (this.ws?.readyState === 1) this.ws.send(JSON.stringify({ t: 'say', text, final: true }));
+    this.commitAt = performance.now();
+    this.sendObj({ t: 'say', text, final: true });
     UI.$('call-state').textContent = 'denkt nach…';
   }
 
   /* ================= TTS state ================= */
   onTtsStart() {
+    if (this.commitAt) {
+      const ttfa = performance.now() - this.commitAt;
+      this.perf.ttfa.push(ttfa); this.perf.ttfa = this.perf.ttfa.slice(-12);
+      this.commitAt = 0;
+      this.setChip('chip-vlm', `Stimme nach ${(ttfa / 1000).toFixed(1)} s`, true);
+      this.renderEngineInfo();
+    }
     UI.$('her').classList.add('speaking');
     UI.$('her').classList.remove('listening');
     this.vad.setSheSpeaks(true);
@@ -613,6 +665,11 @@ class App {
       { type: 'select', key: 'previewMode', label: 'Vorschau unten', options: [{ value: 'exact', label: 'exakte Modell-Frames (Standard)' }, { value: 'fluid', label: 'flüssiges Kamerabild + Frame-Marker' }] },
       { type: 'switch', key: 'pixelExact', label: 'Pixelhart skalieren', desc: 'Deaktiviert die Glättung der Vorschau, damit du 1:1 siehst, was im JPEG steht.' },
 
+      { group: 'Tempo & Latenz' },
+      { type: 'switch', key: 'turbo', label: 'Turbo (minimale Latenz)', desc: '512-px-Frames, greedige Dekodierung, max. 2 Sätze, kürzere Scene-Notes. Opfer: etwas Bild- und Antworttiefe.' },
+      { type: 'info', key: 'perf', rows: [['Ø TTFT', '–'], ['Ø TTFA', '–']] },
+      { type: 'info', key: 'ondevice', rows: [['On-Device', 'prüfe…']] },
+
       { group: 'Dialog-Gehirn (optional)' },
       { type: 'switch', key: 'llmEnable', label: 'Externes LLM fürs Reden', desc: 'FastVLM liefert dann nur noch, was sie sieht; ein OpenAI-kompatibles Modell (z. B. Ollama) formuliert die Antworten. Deutlich bessere Gespräche als mit dem 0,5B-VLM allein.' },
       { type: 'text', key: 'llmBase', label: 'Base-URL', placeholder: 'http://127.0.0.1:11434/v1' },
@@ -638,16 +695,16 @@ class App {
       case 'voiceURI': this.tts.setVoiceURI(v) || this.tts.autoVoice(); break;
       case 'lang':
         this.tts.lang = v; this.asr.setLang(v); this.tts.autoVoice([], v);
-        if (this.ws?.readyState === 1) this.ws.send(JSON.stringify({ t: 'cfg', lang: v.slice(0, 2) }));
+        this.sendObj({ t: 'cfg', lang: v.slice(0, 2) });
         break;
       case 'persona':
-        if (this.ws?.readyState === 1) this.ws.send(JSON.stringify({ t: 'cfg', persona: v }));
+        this.sendObj({ t: 'cfg', persona: v });
         break;
       case 'proactive': case 'activationMode': case 'activationThreshold': case 'activationCooldown':
-        if (this.ws?.readyState === 1) this.ws.send(JSON.stringify({
+        this.sendObj({
           t: 'cfg', proactive: this.s.proactive, activation_mode: this.s.activationMode,
           activation_threshold: this.s.activationThreshold, activation_cooldown: this.s.activationCooldown,
-        }));
+        });
         break;
       case 'neuralVad': this.vad.opts.neural = v; UI.toast('VAD-Wechsel gilt ab dem nächsten Anruf'); break;
       case 'vadOnset': this.vad.tune({ onset: v, offset: Math.max(0.15, v - 0.2) }); break;
@@ -661,6 +718,12 @@ class App {
       case 'ratio': this.vision.ratio = v; break;
       case 'quality': this.vision.quality = v; break;
       case 'intervalMs': this.vision.intervalMs = v; break;
+      case 'turbo':
+        this.vision.size = v ? 512 : this.s.frameSize;
+        this.vision.quality = v ? 0.7 : this.s.quality;
+        this.sendObj({ t: 'cfg', turbo: v });
+        UI.toast(v ? 'Turbo an: 512 px, greedy, max. 2 Sätze' : 'Turbo aus');
+        break;
       case 'llmEnable': case 'llmBase': case 'llmModel': case 'llmKey':
         UI.toast('LLM-Einstellungen gelten ab Server-Neustart (.env) – oder nutze /api/status');
         break;
@@ -686,6 +749,19 @@ class App {
 
   renderEngineInfo() {
     const e = this.server?.engine || {}, l = this.server?.llm || {};
+    const avg = (a) => a.length ? Math.round(a.reduce((x, y) => x + y, 0) / a.length) : null;
+    UI.updateInfoBlock(UI.$('settings-body'), 'perf', [
+      ['Ø TTFT (1. Token)', (avg(this.perf.ttft) ?? '–') + (this.perf.ttft.length ? ' ms' : '')],
+      ['Ø TTFA (1. Stimme)', (avg(this.perf.ttfa) ?? '–') + (this.perf.ttfa.length ? ' ms' : '')],
+      ['Letzte Antwort', this.lastTurnMs ? Math.round(this.lastTurnMs) + ' ms' : '–'],
+      ['Frames gesendet', String(this.vision.frameId || 0)],
+      ['Build', this.buildInfo ? `${this.buildInfo.commit || '?'} · ${this.buildInfo.ts || ''}` : '–'],
+    ]);
+    UI.updateInfoBlock(UI.$('settings-body'), 'ondevice', [
+      ['WebGPU', this.onDevice ? (this.onDevice.webgpu ? 'ja' : 'nein') : '…'],
+      ['Gerät', this.onDevice ? `${this.onDevice.ua} · ${this.onDevice.cores} Kerne` : '…'],
+      ['Pfad', this.onDevice ? this.onDevice.verdict : '…'],
+    ]);
     UI.updateInfoBlock(UI.$('settings-body'), 'engine', [
       ['Backend', e.backend || '–'],
       ['Modell', (e.model || '–').toString().split('/').slice(-1)[0]],

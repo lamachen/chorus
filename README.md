@@ -10,6 +10,12 @@ aus.
 
 Alles läuft **lokal**: Bild, Ton und Text verlassen dein Netz nicht.
 
+**▶ Live-Demo (ganz ohne Server, on-device im Browser):**
+<https://lamachen.github.io/chorus/web/index.html> — findet die App keinen
+Server, schaltet sie automatisch in den **On-Device-Demomodus**: Charakter,
+Bildanalyse, VAD, Spracherkennung und Stimme laufen dann vollständig im
+Browser (z. B. direkt von GitHub Pages). Kamera-/Mikrofreigabe bleibt nötig.
+
 | Bildschirm | Inhalt |
 |---|---|
 | `shots/1-dialer.png` | Telefon-App: Favoriten, Keypad, Verlauf, Kontakte |
@@ -64,6 +70,39 @@ ein lokales LLM (z. B. `llama3.1:8b`) formuliert die Antworten in Character.
 Einstellbar auch live über den Schalter „Externes LLM fürs Reden“.
 
 ---
+
+## 1b · Latenz & On-Device
+
+„Live ist live": Entscheidend ist die Zeit bis zur **gehörten** Antwort, nicht
+bis zum ersten Token. Deshalb misst und optimiert die App genau das:
+
+* **TTFT** (Server → erster Token) und **TTFA** (dein Redeende → erster
+  Sprachton) werden live gemessen und in den Einstellungen als Ø angezeigt.
+* **Satz-Streaming**: Die Stimme beginnt mit Satz 1, während Satz 2 noch
+  generiert wird (Server *und* Demomodus).
+* **Turbo-Profil** (Schalter): 512-px-Frames, greedige Dekodierung, max.
+  2 Sätze, kürzere Scene-Notes – minimiert TTFT auf Kosten von etwas Tiefe.
+* **Frame-Prefetch**: Frames laufen kontinuierlich und getrennt vom Dialog;
+  Scene-Notes und Aktivierungs-Probes rechnen nur, wenn die Engine idle ist,
+  sodass sie den Antwort-Pfad nie blockieren.
+* **Warum FastVLM hier richtig ist**: FastVLMs FastViTHD-Encoder produziert
+  bewusst wenige Vision-Tokens und hat dadurch einen extrem kleinen
+  Time-to-First-Token (Apple: 85× schneller als LLaVA-OneVision-0.5B) – genau
+  die Eigenschaft, die einen Live-Videocall trägt.
+
+**On-Device-Stufen** (heute → morgen):
+1. *Heute, überall:* On-Device-Demomodus (Regel-Charakter + System-Speech) –
+   null Netzwerk-Latenz, läuft auch auf Mittelklasse-Handys.
+2. *Heute, LAN:* Server-Modus mit mlx-vlm (Apple Silicon) oder CUDA; das Handy
+   bleibt Thin Client mit Hardware-VAD.
+3. *Nächster Schritt:* echtes On-Device-VLM im Browser über
+   `onnx-community/FastVLM-0.5B-ONNX` + onnxruntime-web/**WebGPU** (Apple zeigt
+   selbst ein Echtzeit-Video-Captioning-Demo von FastVLM im Browser/WebGPU);
+   die App bringt dafür schon die Fähigkeits-Probe mit (Einstellungen →
+   „On-Device": WebGPU ja/nein, Kerne, Urteil).
+4. *Nativ:* Apples offizielles Repo `apple-aiml-research/ml-fastvlm` enthält
+   CoreML-Exporte/iOS-Beispiel – der Weg für eine native iOS-App mit
+   Neural-Engine-Latenz.
 
 ## 2 · Architektur
 
@@ -199,6 +238,23 @@ REST: `GET /api/status`, `POST /api/warm`, `POST /api/text` (Debug-Einzelshot),
 `GET /api/debug/scene` (Analyse des letzten Frames).
 
 ---
+
+## 4b · Repo & GitHub Pages
+
+Repo: <https://github.com/lamachen/chorus> · Pages (Quelle `main:/`):
+<https://lamachen.github.io/chorus/> (Launcher) bzw. `.../web/index.html` (App).
+
+```bash
+tools/publish.sh "Kurze Notiz was sich geändert hat"
+#   → schreibt web/build_info.json, committet, pusht; Pages baut automatisch
+```
+
+Jede Antwort, die etwas am Code ändert, nennt den Direktlink plus Commit-Sha,
+sobald sich der Pages-Stand aktualisiert hat. **Credentials liegen niemals im
+Repo**: Der Push nutzt einen Credential-Store außerhalb des Arbeitsverzeichnisses
+(`~/.git-credentials`, chmod 600, von Snapshots ausgeschlossen); ein im Chat
+geteiltes Token gilt als kompromittiert und sollte nach der Session rotiert
+werden.
 
 ## 5 · Tests
 

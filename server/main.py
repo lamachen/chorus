@@ -72,7 +72,8 @@ async def status() -> JSONResponse:
         "engine": engines.info(),
         "llm": STATE["llm"].info(),
         "personas": [
-            {"id": p.pid, "name": p.name, "age": p.age, "city": p.city, "tagline": p.tagline, "hue": p.hue}
+            {"id": p.pid, "name": p.name, "age": p.age, "city": p.city, "tagline": p.tagline,
+             "hue": p.hue, "facts": p.facts, "greetings": p.greetings}
             for p in P.PERSONAS.values()
         ],
         "settings": settings.public_dict(),
